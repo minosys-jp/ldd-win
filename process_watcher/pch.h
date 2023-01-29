@@ -7,6 +7,7 @@
 #include <schannel.h>
 #include <shlwapi.h>
 #include <bcrypt.h>
+#include <wincrypt.h>
 #include <stdio.h>
 #include <string.h>
 #include <tchar.h>
@@ -25,3 +26,4 @@
 #pragma comment (lib, "ws2_32.lib")
 #pragma comment (lib, "secur32.lib")
 #pragma comment (lib, "shlwapi.lib")
+#pragma comment (lib, "crypt32.lib")

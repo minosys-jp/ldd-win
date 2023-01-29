@@ -17,6 +17,36 @@ typedef struct {
     char incoming[TLS_MAX_PACKET_SIZE];
 } tls_socket;
 
+void append8(const char* format, ...);
+
+std::string utf16_to_utf8(const std::wstring& s) {
+    int cb = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    char* pTmp = (char*)HeapAlloc(GetProcessHeap(), 0, cb);
+    if (pTmp) {
+        WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, pTmp, cb, nullptr, nullptr);
+        std::string sret(pTmp, cb);
+        HeapFree(GetProcessHeap(), 0, pTmp);
+        return sret;
+    }
+    else {
+        return std::string();
+    }
+}
+
+std::wstring utf8_to_utf16(const std::string& s) {
+    int cb = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    wchar_t* pTmp = (wchar_t*)HeapAlloc(GetProcessHeap(), 0, cb);
+    if (pTmp) {
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, pTmp, cb);
+        std::wstring w(pTmp, cb);
+        HeapFree(GetProcessHeap(), 0, pTmp);
+        return w;
+    }
+    else {
+        return std::wstring();
+    }
+}
+
 // returns 0 on success or negative value on error
 static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& port)
 {
@@ -409,7 +439,7 @@ static int64_t tls_read(tls_socket* s, void* buffer, size_t size)
     return result;
 }
 
-std::string tls_post(const wstring &url, const json &json) {
+std::string tls_post(const wstring &url,const wstring &auth, const json &json) {
     tls_socket s;
     std::wsmatch results;
     TCHAR pat[] = L"(http|https)://([A-Za-z0-9_.-]+)(:\\d+)?(/[/%+A-Za-z0-9_.-]*)";
@@ -454,7 +484,7 @@ std::string tls_post(const wstring &url, const json &json) {
     }
 
     std::unordered_map<std::string, std::string> headers;
-    std::string send_str;
+    std::string send_str, auth_str;
     const char first_template[] = "POST %s HTTP/1.1\r\n";
     size_t len = fstr.length() + 32;
     char* first_line = new char[len];
@@ -466,6 +496,17 @@ std::string tls_post(const wstring &url, const json &json) {
     headers["Connection"] = "close";
     headers["Content-Type"] = "application/json";
     headers["Accept"] = "application/json";
+    if (!auth.empty()) {
+        std::string auth8 = utf16_to_utf8(auth);
+        TCHAR pTmp[128];
+        DWORD cbpTmp = sizeof(pTmp) / sizeof(TCHAR);
+        CryptBinaryToString((BYTE *)auth8.data(), auth8.length(),
+            CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
+            pTmp, &cbpTmp);
+        std::wstring wauth(pTmp, cbpTmp);
+        auth_str = std::string("Basic ") + utf16_to_utf8(wauth);
+        headers["Authorization"] = auth_str.c_str();
+    }
 
     std::string jd = json.dump();
     snprintf(first_line, len, "%zd", jd.length());
@@ -477,7 +518,7 @@ std::string tls_post(const wstring &url, const json &json) {
     }
     send_str += "\r\n";
     send_str += jd;
-    printf("\n\nsend: %.*s\n", (uint32_t)send_str.length(), send_str.data());
+    append8("\n\nsend: %.*s\n", (uint32_t)send_str.length(), send_str.data());
     tls_write(&s, send_str.data(), send_str.length());
     int64_t rlen;
     int cBuffer = 64 * 1024;
@@ -485,7 +526,7 @@ std::string tls_post(const wstring &url, const json &json) {
     std::string result;
 
     while ((rlen = tls_read(&s, buffer, cBuffer)) > 0) {
-        printf("\n%zd:%.*s\n", rlen, (uint32_t)rlen, buffer);
+        append8("\n%zd:%.*s\n", rlen, (uint32_t)rlen, buffer);
         result += std::string(buffer, rlen);
     }
     tls_disconnect(&s);

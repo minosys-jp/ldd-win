@@ -11,64 +11,25 @@ struct ProcHashItem {
     std::wstring hashValue;
     DWORD proc_id;
     int db_id;
-    int status;
     std::set<int> child_inds;   // vector index
     std::set<int> child_ids;    // DB id   
-    const static int FLG_BLACK = 1;
-    const static int FLG_WHITE = 2;
-    const static int FLG_GRAY = 3;
-    ProcHashItem() : filename(), hashValue(), proc_id(0), db_id(0), status(FLG_BLACK), child_inds(), child_ids() {}
-    ProcHashItem(const std::wstring& filename, DWORD proc_id, int status) : filename(filename), status(status), proc_id(proc_id), db_id(0), hashValue(), child_inds(), child_ids() {}
+    ProcHashItem() : filename(), hashValue(), proc_id(0), db_id(0), child_inds(), child_ids() {}
+    ProcHashItem(const std::wstring& filename, DWORD proc_id) : filename(filename), proc_id(proc_id), db_id(0), hashValue(), child_inds(), child_ids() {}
 };
 typedef std::vector<ProcHashItem> ProcHash;
 typedef std::unordered_map <std::wstring, int> ProcReverseHash;
-typedef std::vector<DWORD> BlackProcIds;
-std::wstring goption;
 
-std::string utf16_to_utf8(const std::wstring& s) {
-    char szTmp[1024];
-    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, szTmp, sizeof(szTmp), nullptr, nullptr);
-    return std::string(szTmp);
-}
-
-std::wstring utf8_to_utf16(const std::string& s) {
-    int cb = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    wchar_t* pTmp = (wchar_t*)HeapAlloc(GetProcessHeap(), 0, cb);
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, pTmp, cb);
-    std::wstring w(pTmp, cb);
-    HeapFree(GetProcessHeap(), 0, pTmp);
-    return w;
-}
-
-std::string tls_post(const std::wstring& url, const json& json);
+std::string utf16_to_utf8(const std::wstring& s);
+std::wstring utf8_to_utf16(const std::string& s);
+std::string tls_post(const std::wstring& url, const std::wstring &auth, const json & json);
+void append8(const char* fmt, ...);
+void append16(const TCHAR* fmt, ...);
 
 void clear16() {
     FILE* f;
-    if (_tfopen_s(&f, L"process_watcher.log", L"w") == 0) {
+    if (_tfopen_s(&f, L"process_watcher.log", L"w") == 0 && f != nullptr) {
         fclose(f);
     }
-}
-
-void append16(const TCHAR* format, ...) {
-    va_list va;
-    FILE* f;
-    va_start(va, format);
-    if (_tfopen_s(&f, L"process_watcher.log", L"a") == 0) {
-        vfwprintf(f, format, va);
-        fclose(f);
-    }
-    va_end(va);
-}
-
-void append8(const char* format, ...) {
-    va_list va;
-    FILE* f;
-    va_start(va, format);
-    if (fopen_s(&f, "process_watcher.log", "a") == 0) {
-        vfprintf(f, format, va);
-        fclose(f);
-    }
-    va_end(va);
 }
 
 /**
@@ -427,7 +388,7 @@ std::wstring calcHash(BCRYPT_ALG_HANDLE hProv, std::wstring szFileName) {
 /**
  * DB 更新ロジック
  */
-sqlite3* UpdateDb(BCRYPT_ALG_HANDLE hProv, ProcHash& procHash, ProcReverseHash &procRevHash, BlackProcIds &bids, const std::wstring& dbName) {
+sqlite3* UpdateDb(BCRYPT_ALG_HANDLE hProv, ProcHash& procHash, ProcReverseHash &procRevHash, const std::wstring& dbName) {
     // phase1: Hash の計算
     for (ProcHash::iterator i = procHash.begin(); i != procHash.end(); i++) {
         i->hashValue = calcHash(hProv, i->filename);
@@ -453,7 +414,7 @@ sqlite3* UpdateDb(BCRYPT_ALG_HANDLE hProv, ProcHash& procHash, ProcReverseHash &
 
     for (ProcHash::iterator i = procHash.begin(); i != procHash.end(); i++) {
         sqlite3_stmt* stmt;
-        wchar_t sql_get_id[] = L"SELECT id, sha256, flg_white FROM path_infos WHERE file_path=?";
+        wchar_t sql_get_id[] = L"SELECT id, sha256 FROM path_infos WHERE file_path=?";
         if (sqlite3_prepare16(conn, sql_get_id, sizeof(sql_get_id) - 1, &stmt, nullptr) != SQLITE_OK) {
             append8("failed to prepare select SQL\n");
             sqlite3_exec(conn, "ROLLBACK", nullptr, nullptr, nullptr);
@@ -461,133 +422,58 @@ sqlite3* UpdateDb(BCRYPT_ALG_HANDLE hProv, ProcHash& procHash, ProcReverseHash &
             return NULL;
         }
         sqlite3_bind_text16(stmt, 1, i->filename.data(), i->filename.length(), nullptr);
-        int rcode, status = 1, id = 0;
+        int rcode, id = 0;
         bool bChanged = false;
         std::wstring sha256;
         while ((rcode = sqlite3_step(stmt)) == SQLITE_ROW) {
             id = sqlite3_column_int(stmt, 0);
             sha256 = std::wstring((const wchar_t*)sqlite3_column_text16(stmt, 1));
-            status = sqlite3_column_int(stmt, 2);
         }
         std::string s = utf16_to_utf8(sha256);
         if (id != 0) {
-            append8("found id : %d, sha256: %s, status:%d\n", id, s.c_str(), status);
+            append8("found id : %d, sha256: %s\n", id, s.c_str());
         }
 
+        SYSTEMTIME systime;
+        GetLocalTime(&systime);
+        TCHAR wsystimeStr[30];
+        _snwprintf(wsystimeStr, 30, L"%04d-%02d-%02d %02d:%02d:%02d",
+            systime.wYear, systime.wMonth, systime.wDay,
+            systime.wHour, systime.wMinute, systime.wSecond);
         if (id == 0 && rcode != SQLITE_ERROR) {
             // 新しいファイル
             sqlite3_finalize(stmt);
-            wchar_t sql_insert[] = L"INSERT INTO path_infos (file_path, sha256, flg_white) VALUES (?, ?, ?)";
+            wchar_t sql_insert[] = L"INSERT INTO path_infos (file_path, sha256, updated_at) VALUES (?, ?, ?)";
             sqlite3_prepare16(conn, sql_insert, sizeof(sql_insert) - 1, &stmt, nullptr);
 
             sqlite3_bind_text16(stmt, 1, i->filename.data(), i->filename.length() * sizeof(wchar_t), nullptr);
             sqlite3_bind_text16(stmt, 2, i->hashValue.data(), i->hashValue.length() * sizeof(wchar_t), nullptr);
-            sqlite3_bind_int(stmt, 3, i->status);
+            sqlite3_bind_text16(stmt, 3, wsystimeStr, _tcslen(wsystimeStr) * sizeof(wchar_t), nullptr);
             sqlite3_step(stmt);
             id = (int)sqlite3_last_insert_rowid(conn);
             bChanged = true;
             std::string htmp = utf16_to_utf8(i->hashValue);
-            append8("New file: id:%d, sha256: %s, status:%d\n", id, htmp.c_str(), i->status);
+            append8("New file: id:%d, sha256: %s\n", id, htmp.c_str());
         }
-        else if (rcode != SQLITE_ERROR) {
-            if (status == ProcHashItem::FLG_BLACK && i->proc_id != (DWORD)0) {
-                // Black list は常に報告
-                std::string sf = utf16_to_utf8(i->filename);
-                append8("Process %s is Black\n", sf.c_str());
-                bChanged = true;
-                bids.push_back(i->proc_id);
-            }
-            if (sha256 != i->hashValue) {
-                // ファイル内容が変わった
-                sqlite3_reset(stmt);
-                sqlite3_clear_bindings(stmt);
-                sqlite3_finalize(stmt);
-                if (status != ProcHashItem::FLG_BLACK && goption == L"-w") {
-                    wchar_t sql_update[] = L"UPDATE path_infos SET sha256=?, flg_white=2' WHERE id=?";
-                    sqlite3_prepare16(conn, sql_update, -1, &stmt, nullptr);
-                    status = ProcHashItem::FLG_WHITE;
-                }
-                else {
-                    wchar_t sql_update[] = L"UPDATE path_infos SET sha256=? WHERE id=?";
-                    sqlite3_prepare16(conn, sql_update, -1, &stmt, nullptr);
-                }
-                sqlite3_bind_text16(stmt, 1, sha256.data(), sha256.length() * sizeof(wchar_t), nullptr);
-                sqlite3_bind_int(stmt, 2, id);
-                sqlite3_step(stmt);
-                bChanged = true;
-                std::string htmp = utf16_to_utf8(sha256);
-                append8("Changed file: id:%d, sha256: %s, status:%d\n", id, htmp.c_str(), status);
-            }
+        else if (id != 0) {
+            // 既出の場合は時刻を更新する
+            sqlite3_finalize(stmt);
+            wchar_t sql_insert[] = L"UPDATE path_infos SET updated_at=? WHERE id=?";
+            sqlite3_prepare16(conn, sql_insert, sizeof(sql_insert) - 1, &stmt, nullptr);
+            sqlite3_bind_text16(stmt, 1, wsystimeStr, _tcslen(wsystimeStr) * sizeof(wchar_t), nullptr);
+            sqlite3_bind_int(stmt, 2, id);
+            sqlite3_step(stmt);
         }
         sqlite3_reset(stmt);
         sqlite3_clear_bindings(stmt);
         sqlite3_finalize(stmt);
 
         i->db_id = id;
-        if (bChanged) {
-            updatedHash.push_back(*i);
-            updatedRevHash[i->db_id] = updatedHash.size() - 1;
-        }
+        updatedHash.push_back(*i);
+        updatedRevHash[i->db_id] = updatedHash.size() - 1;
     }
     append8("#phase2 finished\n");
 
-    // phase3: 共有DLLのかけ替えを検出
-    for (ProcHash::iterator i = procHash.begin(); i != procHash.end(); i++) {
-        if (i->proc_id == (DWORD)0) {
-            // DLL はチェックしない
-            continue;
-        }
-
-        std::set <int> dbset;
-        sqlite3_stmt* stmt;
-
-        for (std::set<int>::const_iterator j = i->child_inds.cbegin(); j != i->child_inds.cend(); j++) {
-            // 新しい DLL 関係を構成
-            int dbid = procHash[*j].db_id;
-            if (dbset.find(dbid) == dbset.end()) {
-                dbset.insert(dbid);
-            }
-        }
-        updatedHash[updatedRevHash[i->db_id]].child_ids = dbset;
-
-        // 古い DLL 関係を構成
-        wchar_t sql_get_links[] = L"SELECT r.child_id FROM relations r INNER JOIN (SELECT max(created_at) mat, parent_id FROM relations GROUP BY parent_id) m ON m.mat=r.created_at WHERE r.parent_id=?";
-        sqlite3_prepare16(conn, sql_get_links, -1, &stmt, nullptr);
-        sqlite3_bind_int(stmt, 1, i->db_id);
-        std::set <int> dbold;
-        int rcode;
-        while ((rcode = sqlite3_step(stmt)) == SQLITE_ROW) {
-            int oldid = sqlite3_column_int(stmt, 0);
-            if (dbold.find(oldid) == dbold.end()) {
-                dbold.insert(oldid);
-            }
-        }
-        sqlite3_reset(stmt);
-        sqlite3_clear_bindings(stmt);
-        sqlite3_finalize(stmt);
-
-        // 両者の関係が異なる場合は relations に記録する
-        if (dbset != dbold) {
-            wchar_t sql_rel[] = L"INSERT INTO relations (created_at, parent_id, child_id) VALUES (datetime('now'), ?, ?)";
-            sqlite3_prepare16(conn, sql_rel, -1, &stmt, nullptr);
-            append8("Changed relations for %d\n", i->db_id);
-            for (std::set <int>::const_iterator j = dbset.cbegin(); j != dbset.cend(); j++) {
-                sqlite3_bind_int(stmt, 1, i->db_id);
-                sqlite3_bind_int(stmt, 2, *j);
-                sqlite3_step(stmt);
-                sqlite3_reset(stmt);
-                sqlite3_clear_bindings(stmt);
-                if (updatedRevHash.find(*j) == updatedRevHash.end()) {
-                    // DLL 未登録ならば再録
-                    updatedHash.push_back(*i);
-                    updatedRevHash[*j] = updatedHash.size() - 1;
-                }
-                append8("%d => %d ", i->db_id, *j);
-            }
-            append8("\n");
-            sqlite3_finalize(stmt);
-        }
-    }
     procHash = updatedHash;
     append8("DB updated\n");
     return conn;
@@ -620,8 +506,7 @@ bool EnumInvokedProcesses(ProcHash &procHash, ProcReverseHash &procRevHash) {
         std::wstring dst;
         if (PrintProcessNameAndID(aProcesses[i], dst)) {
             if (procRevHash.find(dst) == procRevHash.end()) {
-                int status = (goption == L"-w") ? ProcHashItem::FLG_WHITE : ProcHashItem::FLG_GRAY;
-                procHash.push_back(ProcHashItem(dst, aProcesses[i], status));
+                procHash.push_back(ProcHashItem(dst, aProcesses[i]));
                 procRevHash[dst] = procHash.size() - 1;
             }
             std::set<std::wstring> children;
@@ -634,7 +519,7 @@ bool EnumInvokedProcesses(ProcHash &procHash, ProcReverseHash &procRevHash) {
                     int p_index = procRevHash.find(dst)->second;
                     for (std::set<std::wstring>::const_iterator j = children.cbegin(); j != children.cend(); j++) {
                         if (procRevHash.find(*j) == procRevHash.end()) {
-                            procHash.push_back(ProcHashItem(*j, 0, ProcHashItem::FLG_WHITE));
+                            procHash.push_back(ProcHashItem(*j, 0));
                             procRevHash[*j] = procHash.size() - 1;
                         }
                         int d_index = procRevHash.find(*j)->second;
@@ -660,22 +545,9 @@ BOOL CreateLocalDB(const std::wstring& dbName) {
             sqlite3_close(conn);
             return FALSE;
         }
-        if (sqlite3_exec(conn, "CREATE TABLE path_infos (id integer primary key autoincrement, file_path varchar(1024) not null unique, sha256 varchar(128) not null, flg_white integer not null default 1)", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        if (sqlite3_exec(conn, "CREATE TABLE path_infos (id integer primary key autoincrement, file_path varchar(1024) not null unique, sha256 varchar(128) not null, flg_white integer not null default 1, updated_at datetime not null)", nullptr, nullptr, nullptr) != SQLITE_OK) {
             append8("failed to create paths_info table\n");
             sqlite3_close(conn);
-            return FALSE;
-        }
-        if (sqlite3_exec(conn, "CREATE TABLE relations (id integer primary key autoincrement, parent_id integer not null, child_id integer not null, created_at datetime)", nullptr, nullptr, nullptr) != SQLITE_OK) {
-            append8("failed to create relations table\n");
-            sqlite3_close(conn);
-            return FALSE;
-        }
-        if (sqlite3_exec(conn, "CREATE TABLE kv (ckey varchar(32) not null primary key, cvalue integer, cstr varchar(1024))", nullptr, nullptr, nullptr) != SQLITE_OK) {
-            append8("failed ro create key-value table\n");
-            return FALSE;
-        }
-        if (sqlite3_exec(conn, "INSERT INTO kv (ckey, cvalue) VALUES ('kill_black_processes', 1)", nullptr, nullptr, nullptr) != SQLITE_OK) {
-            append8("failed to insert 'kill_black_processes' key\n");
             return FALSE;
         }
         sqlite3_close(conn);
@@ -683,14 +555,17 @@ BOOL CreateLocalDB(const std::wstring& dbName) {
     return TRUE;
 }
 
-void killBlackProcesses(BlackProcIds bids) {
-    for (std::vector<DWORD>::const_iterator i = bids.cbegin(); i != bids.end(); i++) {
+void killBlackProcesses(json json) {
+    auto blacks = json.find("kill_black_processes");
+    for (auto black = blacks->cbegin(); blacks != blacks->cend(); blacks++) {
         HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION |
             PROCESS_TERMINATE |
             PROCESS_VM_READ,
-            FALSE, *i);
-        TerminateProcess(hProcess, 255);
-        if (hProcess) CloseHandle(hProcess);
+            FALSE, *black);
+        if (hProcess) {
+            TerminateProcess(hProcess, 255);
+            CloseHandle(hProcess);
+        }
     }
 }
 
@@ -729,89 +604,6 @@ std::string decodeChunkedStr(const std::string& src) {
     return dst;
 }
 
-bool getKValue(sqlite3* conn, const TCHAR* ckey, int cdef) {
-    int ret = cdef;
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare16(conn, L"SELECT cvalue FROM kv WHERE ckey=?", -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text16(stmt, 1, ckey, -1, nullptr);
-        int rcode;
-        while ((rcode = sqlite3_step(stmt)) == SQLITE_ROW) {
-            ret = sqlite3_column_int(stmt, 0);
-        }
-        sqlite3_reset(stmt);
-        sqlite3_clear_bindings(stmt);
-        sqlite3_finalize(stmt);
-    }
-    return ret;
-}
-
-void saveKValue(sqlite3* conn, const TCHAR* ckey, int cvalue) {
-    sqlite3_stmt* stmt;
-    bool bClean = false;
-    if (sqlite3_prepare16(conn, L"SELECT EXISTS(SELECT * FROM kv WHERE ckey=?)", -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text16(stmt, 1, ckey, -1, nullptr);
-        int rcode;
-        bool found = false;
-        while ((rcode = sqlite3_step(stmt)) == SQLITE_ROW) {
-            found = (sqlite3_column_int(stmt, 0) != 0);
-        }
-        sqlite3_reset(stmt);
-        sqlite3_clear_bindings(stmt);
-        sqlite3_finalize(stmt);
-
-        if (found) {
-            if (sqlite3_prepare16(conn, L"UPDATE kv SET cvalue = ? WHERE ckey = ?", -1, &stmt, nullptr) == SQLITE_OK) {
-                sqlite3_bind_int(stmt, 1, cvalue);
-                sqlite3_bind_text16(stmt, 2, ckey, -1, nullptr);
-                sqlite3_step(stmt);
-                bClean = true;
-            }
-        }
-        else {
-            if (sqlite3_prepare16(conn, L"INSERT INTO kv (ckey, cvalue) VALUES (?, ?)", -1, &stmt, nullptr) == SQLITE_OK) {
-                sqlite3_bind_text16(stmt, 1, ckey, -1, nullptr);
-                sqlite3_bind_int(stmt, 2, cvalue);
-                sqlite3_step(stmt);
-                bClean = true;
-            }
-        }
-    }
-    if (bClean) {
-        sqlite3_reset(stmt);
-        sqlite3_clear_bindings(stmt);
-        sqlite3_finalize(stmt);
-    }
-}
-
-/**
-* status 設定命令の実行
- */
-void setProcStatus(sqlite3* conn, const json& json, const char* key, int value) {
-    auto statusArr = json.find(key);
-    std::wstring statusSet;
-    if (statusArr != json.cend()) {
-        // status 設定命令がサーバからもたらされた場合
-        for (auto st = statusArr->cbegin(); st != statusArr->cend(); st++) {
-            if (st != statusArr->cbegin()) {
-                statusSet += L",";
-            }
-            TCHAR bBuff[20];
-            int nVal = *st;
-            _stprintf_p(bBuff, sizeof(bBuff) / sizeof(TCHAR), L"%d", nVal);
-            statusSet += bBuff;
-        }
-        TCHAR statusBaseSQL[] = L"UPDATE path_infos SET flg_white=%d WHERE id in (%ws)";
-        size_t cbStatusSQL = sizeof(statusBaseSQL) + statusSet.size() * 2 + 2;
-        TCHAR* statusSQL = new TCHAR[cbStatusSQL];
-        _stprintf_p(statusSQL, cbStatusSQL, statusBaseSQL, value, statusSet.c_str());
-        sqlite3_stmt* stmt;
-        sqlite3_prepare16(conn, statusSQL, _tcslen(statusSQL), &stmt, nullptr);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-        delete[] statusSQL;
-    }
-}
-
 /**
  * メイン関数
  */
@@ -822,9 +614,6 @@ int _tmain(int argc, TCHAR** argv)
 
     // 設定ファイルの読み込み
     std::wstring iniFile(L"process_watcher.ini");
-    if (argc >= 2) {
-        goption = argv[1];
-    }
 
     // サーバ名
     TCHAR szBuff[MAX_PATH + 100];
@@ -840,6 +629,11 @@ int _tmain(int argc, TCHAR** argv)
         append8("failed to load a server URL\n");
         return 1;
     }
+
+    // authorization header
+    ZeroMemory(szBuff, sizeof(szBuff));
+    GetPrivateProfileString(L"server", L"auth", nullptr, szBuff, sizeof(szBuff) / sizeof(TCHAR), iniFile.c_str());
+    std::wstring sAuth(szBuff);
 
     // tenant 名
     ZeroMemory(szBuff, sizeof(szBuff));
@@ -919,23 +713,15 @@ int _tmain(int argc, TCHAR** argv)
     }
 
     // phase2: DB 更新
-    BlackProcIds bids;
     sqlite3* conn;
-    if ((conn = UpdateDb(hProv, procHash, procRevHash, bids, dbName)) == NULL) {
+    if ((conn = UpdateDb(hProv, procHash, procRevHash, dbName)) == NULL) {
        BCryptCloseAlgorithmProvider(hProv, 0);
         append8("failed to update database\n");
         return 1;
     }
-    int nKillBlackProc = getKValue(conn, L"kill_black_processes", 1);
 
-    // phase3: Black process の抹消
-    if (nKillBlackProc != 0 && bids.size() > 0) {
-        append8("Kill Black processes\n");
-        killBlackProcesses(bids);
-    }
-
-    // phase4: 変更通知
-    append8("#Phase4 started\n");
+    // phase3: 変更通知
+    append8("#Phase3 started\n");
     json v;
     append8("pass1\n");
     v["tenant"] = utf16_to_utf8(sTenant);
@@ -945,7 +731,6 @@ int _tmain(int argc, TCHAR** argv)
     for (ProcHash::iterator i = procHash.begin(); i != procHash.end(); i++, count++) {
         v["fingers"][count]["dbid"] = i->db_id;
         v["fingers"][count]["name"] = utf16_to_utf8(i->filename);
-        v["fingers"][count]["status"] = i->status;
         if (!i->hashValue.empty()) {
             v["fingers"][count]["finger"] = utf16_to_utf8(i->hashValue);
         }
@@ -968,9 +753,8 @@ int _tmain(int argc, TCHAR** argv)
     }
     append8("passed: %s\n", v.dump().c_str());
     count = 0;
-/*
     for (count = 0; count < 10; count++) {
-        std::string r = tls_post(sServerUrl, v);
+        std::string r = tls_post(sServerUrl, sAuth, v);
         append8("Result: %s\n", r.c_str());
         if (r.length() > 0) {
             size_t tpos = r.find(std::string("\r\n\r\n"));
@@ -981,19 +765,16 @@ int _tmain(int argc, TCHAR** argv)
             }
             json json = json::parse(jsonStr);
             if (json[0] == true) {
-                if (json[1].find("kill_black_processes") != json.end()) {
-                    int nKillBlackProcess = json[1]["kill_black_processes"];
-                    saveKValue(conn, L"kill_black_processes", nKillBlackProcess);
+                // phase4: Black process の抹消
+                if (json[1].find("kill_black_processes") != json[1].cend()) {
+                    killBlackProcesses(json[1]);
                 }
-                setProcStatus(conn, json[1], "black", ProcHashItem::FLG_BLACK);
-                setProcStatus(conn, json[1], "whtie", ProcHashItem::FLG_WHITE);
             }
             count++;
             break;
         }
         Sleep(2000);
     }
-*/
     BCryptCloseAlgorithmProvider(hProv, 0);
     if (count > 0) {
         sqlite3_exec(conn, "COMMIT", nullptr, nullptr, nullptr);

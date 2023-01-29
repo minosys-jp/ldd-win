@@ -32,6 +32,9 @@
     <ClCompile Include="tls.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="logs.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="PropertySheet.props" />
