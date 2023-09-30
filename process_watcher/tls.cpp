@@ -1,29 +1,18 @@
 #include "pch.h"
-#define TLS_MAX_PACKET_SIZE (16384+512) // payload + extra over head for header/mac/padding (probably an overestimate)
+#include "tls.h"
 
 using namespace std;
 using wsmatch = std::match_results<wstring>;
 using json = nlohmann::json;
 
-typedef struct {
-    SOCKET sock;
-    CredHandle handle;
-    CtxtHandle context;
-    SecPkgContext_StreamSizes sizes;
-    int received;    // byte count in incoming buffer (ciphertext)
-    int used;        // byte count used from incoming buffer to decrypt current packet
-    int available;   // byte count available for decrypted bytes
-    char* decrypted; // points to incoming buffer where data is decrypted inplace
-    char incoming[TLS_MAX_PACKET_SIZE];
-} tls_socket;
 
 void append8(const char* format, ...);
 
 std::string utf16_to_utf8(const std::wstring& s) {
-    int cb = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    int cb = WideCharToMultiByte(CP_UTF8, 0, s.data(), s.length(), nullptr, 0, nullptr, nullptr);
     char* pTmp = (char*)HeapAlloc(GetProcessHeap(), 0, cb);
     if (pTmp) {
-        WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, pTmp, cb, nullptr, nullptr);
+        WideCharToMultiByte(CP_UTF8, 0, s.data(), s.length(), pTmp, cb, nullptr, nullptr);
         std::string sret(pTmp, cb);
         HeapFree(GetProcessHeap(), 0, pTmp);
         return sret;
@@ -34,10 +23,10 @@ std::string utf16_to_utf8(const std::wstring& s) {
 }
 
 std::wstring utf8_to_utf16(const std::string& s) {
-    int cb = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    int cb = MultiByteToWideChar(CP_UTF8, 0, s.data(), s.length(), nullptr, 0);
     wchar_t* pTmp = (wchar_t*)HeapAlloc(GetProcessHeap(), 0, cb);
     if (pTmp) {
-        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, pTmp, cb);
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), s.length(), pTmp, cb);
         std::wstring w(pTmp, cb);
         HeapFree(GetProcessHeap(), 0, pTmp);
         return w;
@@ -47,8 +36,12 @@ std::wstring utf8_to_utf16(const std::string& s) {
     }
 }
 
+std::string TlsSocket::proxystr() {
+    return std::string();
+}
+
 // returns 0 on success or negative value on error
-static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& port)
+int TlsSocket::connect(const wstring& hostname, const wstring& port)
 {
     // initialize windows sockets
     WSADATA wsadata;
@@ -58,19 +51,61 @@ static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& po
     }
 
     // create TCP IPv4 socket
-    s->sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (s->sock == INVALID_SOCKET)
+    this->sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (this->sock == INVALID_SOCKET)
     {
         WSACleanup();
         return -1;
     }
 
     // connect to server
-    if (!WSAConnectByName(s->sock, (LPWSTR)hostname.c_str(), (LPWSTR)port.c_str(), NULL, NULL, NULL, NULL, NULL, NULL))
+    std::wstring pxname = this->proxy.empty() ? hostname : this->proxy;
+    std::wstring pxport = this->proxy.empty() ? port : this->proxy_port;
+    pxport = pxport.empty() ? L"3129" : pxport;
+    if (!WSAConnectByName(this->sock, (LPWSTR)pxname.c_str(), (LPWSTR)pxport.c_str(), NULL, NULL, NULL, NULL, NULL, NULL))
     {
-        closesocket(s->sock);
+        this->disconnect();
         WSACleanup();
         return -1;
+    }
+    _tprintf(L"Connected to %ws:%ws\n", pxname.c_str(), pxport.c_str());
+
+    // proxy initialization
+    if (!this->proxy.empty()) {
+        std::string hname = utf16_to_utf8(hostname);
+        std::string hport = utf16_to_utf8(port);
+
+        std::string ps = "CONNECT " + hname + ":" + hport + " HTTP/1.1\r\n";
+        ps += "Host:" + utf16_to_utf8(hostname) + ":" + utf16_to_utf8(port) + "\r\n";
+        ps += "User-Agent: Skyster_Client(1.0.0)\r\n";
+        ps += "Proxy-Connection: Keep-Alive\r\n";
+        ps += "\r\n";
+
+        // send proxy headers
+        if (send(this->sock, ps.data(), ps.length(), 0) <= 0) {
+            append8("proxy connect: %s", "failed to connect proxy");
+            this->disconnect();
+            return -1;
+        }
+
+        // receive proxy response
+        std::string rs;
+        char* rsbuff = new char[1024];
+        int rslen = 0;
+        while ((rslen = recv(this->sock, rsbuff, sizeof(rsbuff), 0)) > 0) {
+            rs += rsbuff;
+            if (rs.find("\r\n\r\n") != std::string::npos) {
+                break;
+            }
+        }
+        delete[] rsbuff;
+        if (rs.find("200") == std::string::npos) {
+            append8("proxy connect: %s(%s)", "fail response from proxy", rs.substr(0, 3));
+            this->disconnect();
+            return -1;
+        }
+
+        append8("proxy established to %ws:%ws", hostname.c_str(), port.c_str());
     }
 
     // initialize schannel
@@ -83,16 +118,16 @@ static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& po
             | SCH_CRED_NO_DEFAULT_CREDS;     // no client certificate authentication
         cred.grbitEnabledProtocols = SP_PROT_TLS1_2 | SP_PROT_TLS1_3;
 
-        if (AcquireCredentialsHandle(NULL, (LPWSTR)UNISP_NAME, SECPKG_CRED_OUTBOUND, NULL, &cred, NULL, NULL, &s->handle, NULL) != SEC_E_OK)
+        if (AcquireCredentialsHandle(NULL, (LPWSTR)UNISP_NAME, SECPKG_CRED_OUTBOUND, NULL, &cred, NULL, NULL, &this->handle, NULL) != SEC_E_OK)
         {
-            closesocket(s->sock);
-            WSACleanup();
+            _tprintf(L"%lx\n", GetLastError());
+            this->disconnect();
             return -1;
         }
     }
 
-    s->received = s->used = s->available = 0;
-    s->decrypted = NULL;
+    this->received = this->used = this->available = 0;
+    this->decrypted = NULL;
 
     // perform tls handshake
     // 1) call InitializeSecurityContext to create/update schannel context
@@ -108,8 +143,8 @@ static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& po
     {
         SecBuffer inbuffers[2] = { 0 };
         inbuffers[0].BufferType = SECBUFFER_TOKEN;
-        inbuffers[0].pvBuffer = s->incoming;
-        inbuffers[0].cbBuffer = s->received;
+        inbuffers[0].pvBuffer = this->incoming;
+        inbuffers[0].cbBuffer = this->received;
         inbuffers[1].BufferType = SECBUFFER_EMPTY;
 
         SecBuffer outbuffers[1] = { 0 };
@@ -120,7 +155,7 @@ static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& po
 
         DWORD flags = ISC_REQ_USE_SUPPLIED_CREDS | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_CONFIDENTIALITY | ISC_REQ_REPLAY_DETECT | ISC_REQ_SEQUENCE_DETECT | ISC_REQ_STREAM;
         SECURITY_STATUS sec = InitializeSecurityContext(
-            &s->handle,
+            &this->handle,
             context,
             context ? NULL : (SEC_WCHAR*)hostname.c_str(),
             flags,
@@ -128,22 +163,22 @@ static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& po
             0,
             context ? &indesc : NULL,
             0,
-            context ? NULL : &s->context,
+            context ? NULL : &this->context,
             &outdesc,
             &flags,
             NULL);
 
         // after first call to InitializeSecurityContext context is available and should be reused for next calls
-        context = &s->context;
+        context = &this->context;
 
         if (inbuffers[1].BufferType == SECBUFFER_EXTRA)
         {
-            MoveMemory(s->incoming, s->incoming + (s->received - inbuffers[1].cbBuffer), inbuffers[1].cbBuffer);
-            s->received = inbuffers[1].cbBuffer;
+            MoveMemory(this->incoming, this->incoming + (this->received - inbuffers[1].cbBuffer), inbuffers[1].cbBuffer);
+            this->received = inbuffers[1].cbBuffer;
         }
         else
         {
-            s->received = 0;
+            this->received = 0;
         }
 
         if (sec == SEC_E_OK)
@@ -154,6 +189,7 @@ static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& po
         else if (sec == SEC_I_INCOMPLETE_CREDENTIALS)
         {
             // server asked for client certificate, not supported here
+            _tprintf(L"SEC_I_INCOMPLETE_CREDENTIALS\n");
             result = -1;
             break;
         }
@@ -165,7 +201,8 @@ static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& po
 
             while (size != 0)
             {
-                int d = send(s->sock, buffer, size, 0);
+                int d = send(this->sock, buffer, size, 0);
+                _tprintf(L"sent TLS handshake:%d\n", d);
                 if (d <= 0)
                 {
                     break;
@@ -177,6 +214,7 @@ static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& po
             if (size != 0)
             {
                 // failed to fully send data to server
+                _tprintf(L"failed to fully send data to server\n");
                 result = -1;
                 break;
             }
@@ -187,19 +225,38 @@ static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& po
             // SEC_E_WRONG_PRINCIPAL - bad hostname
             // SEC_E_UNTRUSTED_ROOT - cannot vertify CA chain
             // SEC_E_ILLEGAL_MESSAGE / SEC_E_ALGORITHM_MISMATCH - cannot negotiate crypto algorithms
+            wstring s = L"Unknown reason";
+            switch (sec) {
+            case SEC_E_CERT_EXPIRED: s = L"SEC_E_CERT_EXPIRED"; break;
+            case SEC_E_WRONG_PRINCIPAL: s = L"SEC_E_WRONG_PRINCIPAL"; break;
+            case SEC_E_UNTRUSTED_ROOT: s = L"SEC_E_UNTRUSTED_ROOT"; break;
+            case SEC_E_ILLEGAL_MESSAGE: s = L"SEC_E_ILLEGAL_MESSAGE"; break;
+            case SEC_E_ALGORITHM_MISMATCH: s = L"SEC_E_ALGORITHM_MISMATCH"; break;
+            case SEC_E_BUFFER_TOO_SMALL: s = L"SEC_E_BUFFER_TOO_SMALL"; break;
+            case SEC_E_APPLICATION_PROTOCOL_MISMATCH: s = L"SEC_E_APPLICATION_PROTOCOL_MISMATCH"; break;
+            case SEC_E_BAD_BINDINGS: s = L"SEC_E_BAD_BINDINGS"; break;
+            case SEC_E_BAD_PKGID: s = L"SEC_E_BAD_PKGID"; break;
+            case SEC_E_CERT_UNKNOWN: s = L"SEC_E_CERT_UNKNOWN"; break;
+            case SEC_E_INVALID_TOKEN: s = L"SEC_E_INVALID_TOKEN"; break;
+            default:
+                _tprintf(L"%lllx", sec);
+            }
+            _tprintf(L"%.*ws\n", (unsigned int)s.length(), s.data());
             result = -1;
             break;
         }
 
         // read more data from server when possible
-        if (s->received == sizeof(s->incoming))
+        if (this->received == TLS_MAX_PACKET_SIZE)
         {
             // server is sending too much data instead of proper handshake?
+            _tprintf(L"more data needed\n");
             result = -1;
             break;
         }
 
-        int r = recv(s->sock, s->incoming + s->received, sizeof(s->incoming) - s->received, 0);
+        int r = recv(this->sock, this->incoming + this->received, TLS_MAX_PACKET_SIZE - this->received, 0);
+        _tprintf(L"received data:%d\n", r);
         if (r == 0)
         {
             // server disconnected socket
@@ -208,27 +265,29 @@ static int tls_connect(tls_socket* s, const wstring& hostname, const wstring& po
         else if (r < 0)
         {
             // socket error
+            _tprintf(L"recv socket error\n");
             result = -1;
             break;
         }
-        s->received += r;
+        this->received += r;
     }
+
+    _tprintf(L"Handshake result:%d\n", result);
 
     if (result != 0)
     {
         DeleteSecurityContext(context);
-        FreeCredentialsHandle(&s->handle);
-        closesocket(s->sock);
-        WSACleanup();
+        FreeCredentialsHandle(&this->handle);
+        this->disconnect();
         return result;
     }
 
-    QueryContextAttributes(context, SECPKG_ATTR_STREAM_SIZES, &s->sizes);
+    QueryContextAttributes(context, SECPKG_ATTR_STREAM_SIZES, &this->sizes);
     return 0;
 }
 
 // disconnects socket & releases resources (call this even if tls_write/tls_read function return error)
-static void tls_disconnect(tls_socket* s)
+void TlsSocket::disconnect()
 {
     DWORD type = SCHANNEL_SHUTDOWN;
 
@@ -238,20 +297,20 @@ static void tls_disconnect(tls_socket* s)
     inbuffers[0].cbBuffer = sizeof(type);
 
     SecBufferDesc indesc = { SECBUFFER_VERSION, ARRAYSIZE(inbuffers), inbuffers };
-    ApplyControlToken(&s->context, &indesc);
+    ApplyControlToken(&this->context, &indesc);
 
     SecBuffer outbuffers[1];
     outbuffers[0].BufferType = SECBUFFER_TOKEN;
 
     SecBufferDesc outdesc = { SECBUFFER_VERSION, ARRAYSIZE(outbuffers), outbuffers };
     DWORD flags = ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_CONFIDENTIALITY | ISC_REQ_REPLAY_DETECT | ISC_REQ_SEQUENCE_DETECT | ISC_REQ_STREAM;
-    if (InitializeSecurityContext(&s->handle, &s->context, NULL, flags, 0, 0, &outdesc, 0, NULL, &outdesc, &flags, NULL) == SEC_E_OK)
+    if (InitializeSecurityContext(&this->handle, &this->context, NULL, flags, 0, 0, &outdesc, 0, NULL, &outdesc, &flags, NULL) == SEC_E_OK)
     {
         char* buffer = (char *)outbuffers[0].pvBuffer;
         int size = outbuffers[0].cbBuffer;
         while (size != 0)
         {
-            int d = send(s->sock, buffer, size, 0);
+            int d = send(this->sock, buffer, size, 0);
             if (d <= 0)
             {
                 // ignore any failures socket will be closed anyway
@@ -262,40 +321,39 @@ static void tls_disconnect(tls_socket* s)
         }
         FreeContextBuffer(outbuffers[0].pvBuffer);
     }
-    shutdown(s->sock, SD_BOTH);
+    shutdown(this->sock, SD_BOTH);
 
-    DeleteSecurityContext(&s->context);
-    FreeCredentialsHandle(&s->handle);
-    closesocket(s->sock);
-    WSACleanup();
+    DeleteSecurityContext(&this->context);
+    FreeCredentialsHandle(&this->handle);
+    BaseSocket::disconnect();
 }
 
 // returns 0 on success or negative value on error
-static int64_t tls_write(tls_socket* s, const void* buffer, size_t size)
+int64_t TlsSocket::write(const void* buffer, size_t size)
 {
     char* wbuffer = new char[TLS_MAX_PACKET_SIZE];
     while (size != 0)
     {
-        size_t use = min(size, s->sizes.cbMaximumMessage);
+        size_t use = min(size, this->sizes.cbMaximumMessage);
 
-        assert(s->sizes.cbHeader + s->sizes.cbMaximumMessage + s->sizes.cbTrailer <= TLS_MAX_PACKET_SIZE);
+        assert(this->sizes.cbHeader + this->sizes.cbMaximumMessage + this->sizes.cbTrailer <= TLS_MAX_PACKET_SIZE);
 
         SecBuffer buffers[3];
         ZeroMemory(&buffers[0], sizeof(buffers));
         buffers[0].BufferType = SECBUFFER_STREAM_HEADER;
         buffers[0].pvBuffer = wbuffer;
-        buffers[0].cbBuffer = s->sizes.cbHeader;
+        buffers[0].cbBuffer = this->sizes.cbHeader;
         buffers[1].BufferType = SECBUFFER_DATA;
-        buffers[1].pvBuffer = wbuffer + s->sizes.cbHeader;
+        buffers[1].pvBuffer = wbuffer + this->sizes.cbHeader;
         buffers[1].cbBuffer = (unsigned long)use;
         buffers[2].BufferType = SECBUFFER_STREAM_TRAILER;
-        buffers[2].pvBuffer = wbuffer + s->sizes.cbHeader + use;
-        buffers[2].cbBuffer = s->sizes.cbTrailer;
+        buffers[2].pvBuffer = wbuffer + this->sizes.cbHeader + use;
+        buffers[2].cbBuffer = this->sizes.cbTrailer;
 
         CopyMemory(buffers[1].pvBuffer, buffer, use);
 
         SecBufferDesc desc = { SECBUFFER_VERSION, ARRAYSIZE(buffers), buffers };
-        SECURITY_STATUS sec = EncryptMessage(&s->context, 0, &desc, 0);
+        SECURITY_STATUS sec = EncryptMessage(&this->context, 0, &desc, 0);
         if (sec != SEC_E_OK)
         {
             // this should not happen, but just in case check it
@@ -307,7 +365,7 @@ static int64_t tls_write(tls_socket* s, const void* buffer, size_t size)
         int sent = 0;
         while (sent != total)
         {
-            int d = send(s->sock, wbuffer + sent, total - sent, 0);
+            int d = send(this->sock, wbuffer + sent, total - sent, 0);
             if (d <= 0)
             {
                 // error sending data to socket, or server disconnected
@@ -326,63 +384,63 @@ static int64_t tls_write(tls_socket* s, const void* buffer, size_t size)
 
 // blocking read, waits & reads up to size bytes, returns amount of bytes received on success (<= size)
 // returns 0 on disconnect or negative value on error
-static int64_t tls_read(tls_socket* s, void* buffer, size_t size)
+int64_t TlsSocket::read(void* buffer, size_t size)
 {
     int64_t result = 0;
 
     while (size != 0)
     {
-        if (s->decrypted)
+        if (this->decrypted)
         {
             // if there is decrypted data available, then use it as much as possible
-            size_t use = min(size, s->available);
-            CopyMemory(buffer, s->decrypted, use);
+            size_t use = min(size, this->available);
+            CopyMemory(buffer, this->decrypted, use);
             buffer = (char*)buffer + use;
             size -= use;
             result += use;
 
-            if (use == s->available)
+            if (use == this->available)
             {
                 // all decrypted data is used, remove ciphertext from incoming buffer so next time it starts from beginning
-                MoveMemory(s->incoming, s->incoming + s->used, s->received - s->used);
-                s->received -= s->used;
-                s->used = 0;
-                s->available = 0;
-                s->decrypted = NULL;
+                MoveMemory(this->incoming, this->incoming + this->used, this->received - this->used);
+                this->received -= this->used;
+                this->used = 0;
+                this->available = 0;
+                this->decrypted = NULL;
             }
             else
             {
-                s->available -= (int)use;
-                s->decrypted += (int)use;
+                this->available -= (int)use;
+                this->decrypted += (int)use;
             }
         }
         else
         {
             // if any ciphertext data available then try to decrypt it
-            if (s->received != 0)
+            if (this->received != 0)
             {
                 SecBuffer buffers[4];
-                assert(s->sizes.cBuffers == ARRAYSIZE(buffers));
+                assert(this->sizes.cBuffers == ARRAYSIZE(buffers));
 
                 buffers[0].BufferType = SECBUFFER_DATA;
-                buffers[0].pvBuffer = s->incoming;
-                buffers[0].cbBuffer = s->received;
+                buffers[0].pvBuffer = this->incoming;
+                buffers[0].cbBuffer = this->received;
                 buffers[1].BufferType = SECBUFFER_EMPTY;
                 buffers[2].BufferType = SECBUFFER_EMPTY;
                 buffers[3].BufferType = SECBUFFER_EMPTY;
 
                 SecBufferDesc desc = { SECBUFFER_VERSION, ARRAYSIZE(buffers), buffers };
 
-                SECURITY_STATUS sec = DecryptMessage(&s->context, &desc, 0, NULL);
+                SECURITY_STATUS sec = DecryptMessage(&this->context, &desc, 0, NULL);
                 if (sec == SEC_E_OK)
                 {
                     assert(buffers[0].BufferType == SECBUFFER_STREAM_HEADER);
                     assert(buffers[1].BufferType == SECBUFFER_DATA);
                     assert(buffers[2].BufferType == SECBUFFER_STREAM_TRAILER);
 
-                    s->decrypted = (char *)buffers[1].pvBuffer;
-                    s->available = buffers[1].cbBuffer;
-                    s->used = s->received - (buffers[3].BufferType == SECBUFFER_EXTRA ? buffers[3].cbBuffer : 0);
+                    this->decrypted = (char *)buffers[1].pvBuffer;
+                    this->available = buffers[1].cbBuffer;
+                    this->used = this->received - (buffers[3].BufferType == SECBUFFER_EXTRA ? buffers[3].cbBuffer : 0);
 
                     // data is now decrypted, go back to beginning of loop to copy memory to output buffer
                     continue;
@@ -390,7 +448,7 @@ static int64_t tls_read(tls_socket* s, void* buffer, size_t size)
                 else if (sec == SEC_I_CONTEXT_EXPIRED)
                 {
                     // server closed TLS connection (but socket is still open)
-                    s->received = 0;
+                    this->received = 0;
                     return result;
                 }
                 else if (sec == SEC_I_RENEGOTIATE)
@@ -413,14 +471,14 @@ static int64_t tls_read(tls_socket* s, void* buffer, size_t size)
                 break;
             }
 
-            if (s->received == sizeof(s->incoming))
+            if (this->received == TLS_MAX_PACKET_SIZE)
             {
                 // server is sending too much garbage data instead of proper TLS packet
                 return -1;
             }
 
             // wait for more ciphertext data from server
-            int r = recv(s->sock, s->incoming + s->received, sizeof(s->incoming) - s->received, 0);
+            int r = recv(this->sock, this->incoming + this->received, TLS_MAX_PACKET_SIZE - this->received, 0);
             if (r == 0)
             {
                 // server disconnected socket
@@ -432,27 +490,41 @@ static int64_t tls_read(tls_socket* s, void* buffer, size_t size)
                 result = -1;
                 break;
             }
-            s->received += r;
+            this->received += r;
         }
     }
 
     return result;
 }
 
-std::string tls_post(const wstring &url,const wstring &auth, const json &json) {
-    tls_socket s;
+void json_post(string& r, const wstring &url,const wstring &auth, const json &json, const wstring& proxy) {
+    BaseSocket* ps = nullptr;
     std::wsmatch results;
     TCHAR pat[] = L"(http|https)://([A-Za-z0-9_.-]+)(:\\d+)?(/[/%+A-Za-z0-9_.-]*)";
     std::basic_regex<TCHAR> patr(pat);
     wstring hostname, port;
     std::string host_s, fstr;
+
     if (std::regex_match(url, results, patr)) {
         wstring prot = results[1].str();
         _tprintf(L"prot:%ws\n", prot.c_str());
-        assert(results[1].str() == L"http" || results[1].str() == L"https");
+        assert(prot == L"http" || prot == L"https");
+        if (prot == L"http") {
+            ps = new BaseSocket();
+        }
+        else if (prot == L"https") {
+            ps = new TlsSocket();
+        }
+        else {
+            _tprintf(L"Illegal URL:%ws\n", url.c_str());
+            return;
+        }
         hostname = results[2].str();
         port = results[3].str();
         wstring wfstr = results[4].str();
+        if (wfstr.empty()) {
+            wfstr = L"/";
+        }
         size_t cbFstrLen = wfstr.length() + 1;
         char* fstrBuff = new char[cbFstrLen];
         ZeroMemory(fstrBuff, cbFstrLen);
@@ -468,30 +540,50 @@ std::string tls_post(const wstring &url,const wstring &auth, const json &json) {
         if (port.empty()) {
             port = (prot == L"http") ? L"80" : L"443";
         }
+        else
+        {
+            // ignore : character
+            port = port.substr(1);
+        }
     }
     else {
         _tprintf(L"Illegal URL:%ws\n", url.c_str());
-        return std::string();
+        return;
+    }
+
+    if (!proxy.empty()) {
+        auto pos = proxy.find(L":");
+        std::wstring proxy_host;
+        std::wstring proxy_port;
+
+        if (pos != std::wstring::npos) {
+            ps->proxy = proxy.substr(0, pos);
+            ps->proxy_port = proxy.substr(pos + 1);
+        }
+        else {
+            ps->proxy = proxy;
+            ps->proxy_port = L"3129";
+        }
     }
 
     _tprintf(L"host:%ws, port:%ws\n", hostname.c_str(), port.c_str());
-    printf("host_s:%s", host_s.c_str());
+    printf("host_s:%s, ", host_s.c_str());
     printf("fstr:%s\n", fstr.c_str());
 
-    if (tls_connect(&s, hostname, port) < 0) {
+    if (ps->connect(hostname, port) < 0) {
         _tprintf(L"failed to connect server.\n");
-        return std::string();
+        return;
     }
-
+    _tprintf(L"ps connected\n");
     std::unordered_map<std::string, std::string> headers;
     std::string send_str, auth_str;
-    const char first_template[] = "POST %s HTTP/1.1\r\n";
+    const char first_template[] = "POST %s%s HTTP/1.1\r\n";
     size_t len = fstr.length() + 32;
     char* first_line = new char[len];
-    snprintf(first_line, len, first_template, fstr.c_str());
+    snprintf(first_line, len, first_template, ps->proxystr().c_str(), fstr.c_str());
     send_str += first_line;
     printf("send_str:%s", send_str.c_str());
-    headers["User-Agent"] = "tls_post(1.0.0)";
+    headers["User-Agent"] = "Skyster_Client/1.0.0";
     headers["Host"] = host_s.c_str();
     headers["Connection"] = "close";
     headers["Content-Type"] = "application/json";
@@ -519,20 +611,22 @@ std::string tls_post(const wstring &url,const wstring &auth, const json &json) {
     send_str += "\r\n";
     send_str += jd;
     append8("\n\nsend: %.*s\n", (uint32_t)send_str.length(), send_str.data());
-    tls_write(&s, send_str.data(), send_str.length());
+    ps->write(send_str.data(), send_str.length());
     int64_t rlen;
     int cBuffer = 64 * 1024;
     char* buffer = new char[cBuffer];
-    std::string result;
 
-    while ((rlen = tls_read(&s, buffer, cBuffer)) > 0) {
-        append8("\n%zd:%.*s\n", rlen, (uint32_t)rlen, buffer);
-        result += std::string(buffer, rlen);
+    while ((rlen = ps->read(buffer, cBuffer)) > 0) {
+        r += std::string(buffer, rlen);
     }
-    tls_disconnect(&s);
+    append8("received: %lu bytes\n", (uint32_t)r.length());
+    ps->disconnect();
+    delete ps;
+    append8("CP#1\n");
     delete[] buffer;
+    append8("CP#2\n");
     delete [] first_line;
-    return result;
+    append8("CP#3\n");
 }
 
 /*

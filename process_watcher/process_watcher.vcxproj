@@ -113,8 +113,10 @@
   <ItemGroup>
     <ClInclude Include="..\sqlite3.h" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="tls.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="comm.cpp" />
     <ClCompile Include="logs.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="pch.cpp">

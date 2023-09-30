@@ -1,7 +1,7 @@
 ﻿#pragma once
 #include <winsock2.h>
 #include <windows.h>
-#include "sqlite3.h"
+//#include "sqlite3.h"
 #define SECURITY_WIN32
 #include <security.h>
 #include <schannel.h>
@@ -20,10 +20,16 @@
 #include <regex>
 #include <set>
 #include <assert.h>
+#include <memory>
+#include <sstream>
 
-#pragma comment(lib, "sqlite3.lib")
+extern TCHAR gsDrive[MAX_PATH], gsDir[MAX_PATH], gsFilename[MAX_PATH], gsExt[MAX_PATH];
+
+//#pragma comment(lib, "sqlite3.lib")
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment (lib, "ws2_32.lib")
 #pragma comment (lib, "secur32.lib")
 #pragma comment (lib, "shlwapi.lib")
 #pragma comment (lib, "crypt32.lib")
+#pragma comment (lib, "advapi32.lib")
+#pragma comment (linker, "/STACK:10000000")
