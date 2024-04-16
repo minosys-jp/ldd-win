@@ -74,10 +74,29 @@ wstring GetDriveNameFromPath(const wstring& pathName) {
 	return r;
 }
 
+string GetFileTime(const wstring& fname) {
+	HANDLE hFile = CreateFile(fname.c_str(), 0, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hFile == INVALID_HANDLE_VALUE) {
+		return string();
+	}
+
+	FILETIME mtime;
+	SYSTEMTIME msystem;
+	BOOL r1 = GetFileTime(hFile, NULL, NULL, &mtime);
+	BOOL r2 = FileTimeToSystemTime(&mtime, &msystem);
+	char szDateTime[21];
+	// UTC Time
+	snprintf(szDateTime, sizeof(szDateTime), "%04d-%02d-%02d %02d:%02d:%02d",
+		msystem.wYear, msystem.wMonth, msystem.wDay,
+		msystem.wHour, msystem.wMinute, msystem.wSecond);
+	CloseHandle(hFile);
+	return string(szDateTime);
+}
+
 // modified time Çê›íËÇ∑ÇÈ
 void TouchFileTime(const wstring& fname, const string& mtime, bool isDir) {
 	SYSTEMTIME stTime;
-	sscanf_s(mtime.c_str(), "%04d-%02d-%02d %02d:%02d:%02d",
+	sscanf_s(mtime.c_str(), "%04hd-%02hd-%02hd %02hd:%02hd:%02hd",
 		&stTime.wYear, &stTime.wMonth, &stTime.wDay,
 		&stTime.wHour, &stTime.wMinute, &stTime.wSecond);
 	FILETIME ftTime;

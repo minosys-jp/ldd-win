@@ -18,7 +18,7 @@ wstring driveToGuid(TCHAR driveLetter);
 string utf16_to_utf8(const std::wstring& s);
 //wstring hashDirName(const wstring& guid, const wstring& dirName, bool flg_root);
 wstring hashFileName(const MyFile& file, bool flg_root);
-wstring hashFile(const wstring &fileName);
+//wstring hashFile(const wstring &fileName);
 wstring GetDriveNameFromPath(const wstring &pathName);
 wstring GetDirNameFromPath(const wstring &pathName, int64_t parent);
 wstring GetPathWithoutHostname(const wstring& pathName);
@@ -32,7 +32,7 @@ extern BCRYPT_ALG_HANDLE hAlg;
 extern wstring hostname;
 extern wstring szRoot;
 extern wstring szSource;
-extern wstring dateTag;
+extern string dateTag;
 
 struct MySid {
 	SID sid;
@@ -43,7 +43,6 @@ struct MyFileAttribute {
 	MySid owner;
 	vector<MySid> groups;
 	wstring mtime;
-	wstring hash;
 	boolean flg_create;
 	boolean flg_remove;
 	boolean flg_archive;
@@ -68,7 +67,7 @@ struct MyFile {
 	MyFile(const MyDrive& drive) : drive(drive) {}
 	MyFile() {}
 	bool operator < (const MyFile& mf) const {
-		return fname < mf.fname || attr.mtime < mf.attr.mtime;
+		return fname == mf.fname ? attr.mtime < mf.attr.mtime : fname < mf.fname;
 	}
 	const wstring getPath() const {
 		return TEXT("\\\\?\\") + szSource + TEXT("\\") + drive.name + path;
@@ -77,11 +76,11 @@ struct MyFile {
 	void setFlags(DWORD dwFlags);
 	void setData(const MyFile &parent, const wstring &filename);
 	void setData(const MyFile &parent, const wstring &filename, DWORD dwFlags);
-	void backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& hashPath, const wstring& hashValue, const wstring &dateTag);
-	void recordDirIfChanged(sqlite3* sql3, const MyFile &root, int64_t parent, const wstring &dateTag);
+	void backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& hashPath, const string &dateTag);
+	void recordDirIfChanged(sqlite3* sql3, const MyFile &root, int64_t parent, const string &dateTag);
 	void backup(const wstring& hashPath);
 	int64_t createNewFolderDB(sqlite3* sql3, int64_t parent);
-	int64_t createNewFileDB(sqlite3* sql3, int64_t folder_id, const wstring& hashPath, const wstring& hashValue);
-	int64_t createNewLogDB(sqlite3* sql3, int64_t file_id, const wstring& hashValue, const wstring &dateTag);
-	int64_t createNewLogDB(sqlite3* sql3, int64_t file_id, const wstring &dateTag);
+	int64_t createNewFileDB(sqlite3* sql3, int64_t folder_id, const wstring& hashPath);
+	int64_t createNewLogDBFile(sqlite3* sql3, int64_t file_id, const string &dateTag);
+	int64_t createNewLogDBDir(sqlite3* sql3, int64_t file_id, const string &dateTag);
 };

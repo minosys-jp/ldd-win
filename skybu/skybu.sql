@@ -74,7 +74,6 @@ CREATE TABLE copy_logs (
 	id integer primary key autoincrement,
 	file_id integer not null,
 	owner_id integer,
-	hash_value varchar(64),
 	mtime datetime not null,
 	flg_symbolic integer(1) default 0,
 	flg_directory integer(1) default 0,

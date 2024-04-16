@@ -8,7 +8,7 @@
 #include "common.h"
 
 using namespace std;
-BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &dir, int64_t parent, const wstring &datetag);
+BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &dir, int64_t parent, const string &datetag);
 
 int _tmain(int argc, LPCTSTR *argv)
 {
@@ -84,7 +84,7 @@ int _tmain(int argc, LPCTSTR *argv)
 			}
 		}
 		szRoot = szRootB;
-		dateTag = szCurrent;
+		dateTag = utf16_to_utf8(szCurrent);
 		HeapFree(GetProcessHeap(), 0, szRootB);
 	}
 
@@ -109,6 +109,9 @@ int _tmain(int argc, LPCTSTR *argv)
 	vector<wstring> vecRoots;
 	if (FindRoot(vecRoots, szSource)) {
 		for (wstring drvstr : vecRoots) {
+			if (drvstr.length() != 1) {
+				continue;
+			}
 			sqlite3_exec(sql3, "BEGIN TRANSACTION", NULL, NULL, NULL);
 			MyFile root;
 			root.drive.UpdateDrives(sql3, szSource, drvstr);
@@ -128,8 +131,17 @@ int _tmain(int argc, LPCTSTR *argv)
 }
 
 // バックアップ本体
-BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int64_t parent, const wstring &dateTag) {
+BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int64_t parent, const string &dateTag) {
 	set<MyFile> dirSet;
+	set<wstring> exSet;
+	exSet.insert(TEXT("wsl"));
+	exSet.insert(TEXT("ext4.vhdx"));
+	exSet.insert(TEXT("OneDrive"));
+	exSet.insert(TEXT("マイドライブ"));
+	exSet.insert(TEXT("LocalState"));
+	exSet.insert(TEXT("Temp"));
+	exSet.insert(TEXT(".."));
+	exSet.insert(TEXT("$RECYCLE.BIN"));
 
 	// szTarget ディレクトリの一覧を取得する
 	WIN32_FIND_DATA ffd;
@@ -146,14 +158,14 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 			file.setData(root, L"", ffd.dwFileAttributes);
 			file.recordDirIfChanged(sql3, root, parent, dateTag);
 		} 
-		else if (wstring(TEXT("..")) != ffd.cFileName && wstring(TEXT("$RECYCLE.BIN")) != ffd.cFileName) {
+		else if (exSet.find(ffd.cFileName) == exSet.cend()) {
 			file.setData(root, ffd.cFileName, ffd.dwFileAttributes);
 			if (!file.attr.flg_directory) {
 				// ファイルが通常orリンクファイルだったらファイル名をハッシュしてバックアップファイル名を得る
 				wstring hashPathName = hashFileName(file, false);
 
 				// 新規または以前と内容が変わっていたらファイルバックアップ
-				file.backupFileIfChanged(sql3, parent, hashPathName, file.attr.hash, dateTag);
+				file.backupFileIfChanged(sql3, parent, hashPathName, dateTag);
 			}
 			else if (file.attr.flg_directory) {
 				// 取得したファイルがディレクトリだったら set に追加する
@@ -169,6 +181,7 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 
 	// set が空でない場合、BackupStart() を再帰的に呼び出す
 	for (MyFile dir : dirSet) {
+		wcout << dir.path << endl;
 		BackupStart(sql3, hAlg, dir, parent, dateTag);
 	}
 	return TRUE;

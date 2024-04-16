@@ -9,7 +9,7 @@ BCRYPT_ALG_HANDLE hAlg;
 wstring hostname;
 wstring szRoot;
 wstring szSource;
-wstring dateTag;
+string dateTag;
 char* sqlite3_temp_directory;
 
 // ディレクトリをベクタに分解する
@@ -211,12 +211,6 @@ wstring hashFileName(const MyFile& file, bool flg_root) {
 	return hashStream(ss);
 }
 
-// ファイルのSHA256を取る
-wstring hashFile(const wstring &pathName) {
-	ifstream ifs(pathName, std::ios::binary);
-	return hashStream(ifs);
-}
-
 // DB schema を定義する
 BOOL CreateSql3Database(LPCTSTR lpctFile) {
 	if (!PathFileExists(lpctFile)) {
@@ -332,9 +326,6 @@ void MyFile::setFlags(DWORD dwFlags) {
 		msystem.wHour, msystem.wMinute, msystem.wSecond);
 	this->attr.mtime = szDateTime;
 	CloseHandle(hFile);
-	if (!(dwFlags & FILE_ATTRIBUTE_DIRECTORY)) {
-		this->attr.hash = hashFile(this->path.c_str());
-	}
 }
 
 // 指定されたファイル情報設定する
@@ -351,7 +342,7 @@ void MyFile::setData(const MyFile &parent, const wstring &filename) {
 }
 
 // 新規または更新されているフォルダを登録
-void MyFile::recordDirIfChanged(sqlite3* sql3, const MyFile &root, int64_t parent, const wstring &dateTag) {
+void MyFile::recordDirIfChanged(sqlite3* sql3, const MyFile &root, int64_t parent, const string &dateTag) {
 	sqlite3_stmt* stmt;
 	// folder_id を検索する
 	if (sqlite3_prepare16_v3(sql3,
@@ -423,17 +414,17 @@ void MyFile::recordDirIfChanged(sqlite3* sql3, const MyFile &root, int64_t paren
 	int64_t cl_id = -1LL;
 	if (sqlite3_step(stmt) == SQLITE_ROW) {
 		// 登録済みフォルダ
-		string orgMtime((const char *)sqlite3_column_text(stmt, 4));
+		string orgMtime((const char *)sqlite3_column_text(stmt, 3));
 		string mtime = utf16_to_utf8(attr.mtime);
 		if (orgMtime != mtime) {
 			// 何らかの変更があった
 			int64_t file_id = sqlite3_column_int64(stmt, 1);
-			cl_id = createNewLogDB(sql3, file_id, dateTag);
+			cl_id = createNewLogDBDir(sql3, file_id, dateTag);
 		}
 	}
 	else {
 		// 新規フォルダ
-		cl_id = createNewLogDB(sql3, file_id, dateTag);
+		cl_id = createNewLogDBDir(sql3, file_id, dateTag);
 	}
 	sqlite3_finalize(stmt);
 	if (cl_id >= 0LL) {
@@ -447,10 +438,11 @@ void MyFile::recordDirIfChanged(sqlite3* sql3, const MyFile &root, int64_t paren
 		sqlite3_step(stmt);
 		sqlite3_finalize(stmt);
 	}
+	wcout << L"root_path=" << root.path << L"file_id=" << file_id << L"copy_log_id=" << cl_id << endl;
 }
 
 // 新規 or 更新ならバックアップ
-void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& hashPath, const wstring& hashValue, const wstring &dateTag) {
+void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& hashPath, const string &dateTag) {
 	sqlite3_stmt* stmt;
 	if (sqlite3_prepare16_v3(sql3,
 		L"SELECT l.*, f.folder_id FROM copy_logs l \
@@ -465,19 +457,19 @@ void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& h
 	int64_t file_id = -1;
 	int64_t log_id = -1;
 	if (sqlite3_step(stmt) == SQLITE_ROW) {
-		wstring hashOld = (LPCTSTR)sqlite3_column_text16(stmt, 3);
-		if (hashOld != hashValue) {
+		string mtimeOld = (const char *)sqlite3_column_text(stmt, 3);
+		if (mtimeOld != utf16_to_utf8(this->attr.mtime)) {
 			// 更新ファイル
 			folder_id = sqlite3_column_int64(stmt, 11);
 			file_id = sqlite3_column_int64(stmt, 1);
-			log_id = createNewLogDB(sql3, file_id, hashValue, dateTag);
+			log_id = createNewLogDBFile(sql3, file_id, dateTag);
 		}
 	}
 	else {
 		// 新規ファイル
 		folder_id = createNewFolderDB(sql3, parent);
-		file_id = createNewFileDB(sql3, folder_id, hashPath, hashValue);
-		log_id = createNewLogDB(sql3, file_id, hashValue, dateTag);
+		file_id = createNewFileDB(sql3, folder_id, hashPath);
+		log_id = createNewLogDBFile(sql3, file_id, dateTag);
 	}
 
 	sqlite3_finalize(stmt);
@@ -525,7 +517,7 @@ int64_t MyFile::createNewFolderDB(sqlite3* sql3, int64_t parent) {
 	return id;
 }
 
-int64_t MyFile::createNewFileDB(sqlite3* sql3, int64_t folder_id, const wstring& hashPath, const wstring& hashValue) {
+int64_t MyFile::createNewFileDB(sqlite3* sql3, int64_t folder_id, const wstring& hashPath) {
 	LPTSTR lpPath = (LPTSTR)HeapAlloc(GetProcessHeap(), 0, (MAX_LONG_PATH + 1) * sizeof(TCHAR));
 	_tcscpy_s(lpPath, MAX_LONG_PATH, this->getPath().c_str());
 	LPTSTR lpLongPath = (LPTSTR)HeapAlloc(GetProcessHeap(), 0, (MAX_LONG_PATH + 1) * sizeof(TCHAR));
@@ -546,7 +538,7 @@ int64_t MyFile::createNewFileDB(sqlite3* sql3, int64_t folder_id, const wstring&
 }
 
 // directory 登録
-int64_t MyFile::createNewLogDB(sqlite3* sql3, int64_t file_id, const wstring &dateTag) {
+int64_t MyFile::createNewLogDBDir(sqlite3* sql3, int64_t file_id, const string &dateTag) {
 	sqlite3_stmt* stmt;
 	sqlite3_prepare16_v3(sql3,
 		L"INSERT INTO copy_logs (file_id, mtime, flg_symbolic, flg_archive, flg_hidden, flg_directory, date_tag) \
@@ -559,29 +551,26 @@ int64_t MyFile::createNewLogDB(sqlite3* sql3, int64_t file_id, const wstring &da
 	sqlite3_bind_int(stmt, 4, attr.flg_archive);
 	sqlite3_bind_int(stmt, 5, attr.flg_hidden);
 	sqlite3_bind_int(stmt, 6, 1 /* attr.flg_directory */);
-	string dateTag8 = utf16_to_utf8(dateTag);
-	sqlite3_bind_text(stmt, 7, dateTag8.data(), dateTag8.length(), NULL);
+	sqlite3_bind_text(stmt, 7, dateTag.data(), dateTag.length(), NULL);
 	sqlite3_step(stmt);
 	sqlite3_finalize(stmt);
 	return sqlite3_last_insert_rowid(sql3);
 }
 
 // file 登録
-int64_t MyFile::createNewLogDB(sqlite3* sql3, int64_t file_id, const wstring& hashValue, const wstring &dateTag) {
+int64_t MyFile::createNewLogDBFile(sqlite3* sql3, int64_t file_id, const string &dateTag) {
 	sqlite3_stmt* stmt;
 	sqlite3_prepare16_v3(sql3,
-		L"INSERT INTO copy_logs (file_id, hash_value, mtime, flg_symbolic, flg_archive, flg_hidden, date_tag) \
-		VALUES (?, ?, ?, ?, ?, ?, ?)",
+		L"INSERT INTO copy_logs (file_id, mtime, flg_symbolic, flg_archive, flg_hidden, date_tag) \
+		VALUES (?, ?, ?, ?, ?, ?)",
 		-1, 0, &stmt, NULL);
 	sqlite3_bind_int64(stmt, 1, file_id);
-	sqlite3_bind_text16(stmt, 2, hashValue.data(), hashValue.length() * sizeof(TCHAR), NULL);
 	string mtime = utf16_to_utf8(attr.mtime);
-	sqlite3_bind_text(stmt, 3, mtime.data(), mtime.length(), NULL);
-	sqlite3_bind_int(stmt, 4, attr.flg_symbolic);
-	sqlite3_bind_int(stmt, 5, attr.flg_archive);
-	sqlite3_bind_int(stmt, 6, attr.flg_hidden);
-	string dateTag8 = utf16_to_utf8(dateTag);
-	sqlite3_bind_text(stmt, 7, dateTag8.data(), dateTag8.length(), NULL);
+	sqlite3_bind_text(stmt, 2, mtime.data(), mtime.length(), NULL);
+	sqlite3_bind_int(stmt, 3, attr.flg_symbolic);
+	sqlite3_bind_int(stmt, 4, attr.flg_archive);
+	sqlite3_bind_int(stmt, 5, attr.flg_hidden);
+	sqlite3_bind_text(stmt, 6, dateTag.data(), dateTag.length(), NULL);
 	sqlite3_step(stmt);
 	sqlite3_finalize(stmt);
 	return sqlite3_last_insert_rowid(sql3);

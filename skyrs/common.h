@@ -10,8 +10,7 @@ BOOL CreateDirectoryRecursive(sqlite3 *sql, const wstring& dirName);
 void TouchFileTime(const wstring &fname, const string& ftDate, bool isDir);
 vector<wstring> splitString(const wstring& ws, wchar_t delim = L'\\');
 wstring joinString(const vector<wstring>& svec, const TCHAR sep = L'\\');
-wstring hashFile(const wstring& pathName);
-
+string GetFileTime(const wstring& fname);
 #define DATABASE_NAME L"\\skybu.db"
 #define MAX_LONG_PATH 32768
 
@@ -57,7 +56,7 @@ struct MyFile {
 	wstring fname;
 	MyFileAttribute attr;
 	bool operator < (const MyFile& mf) const {
-		return fname < mf.fname || attr.mtime < mf.attr.mtime;
+		return fname == mf.fname ? attr.mtime < mf.attr.mtime : fname < mf.fname;
 	}
 	wstring getPath() {
 		return TEXT("\\\\?\\") + szDstDrive + dir + L"\\" + fname;

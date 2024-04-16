@@ -99,7 +99,7 @@ wstring sqlIn(const wstring& s, const vector<MyDid>& vDids) {
 	vector<wstring> fdids;
 	TCHAR dtmp[32];
 	for (MyDid did : vDids) {
-		_stprintf_p(dtmp, sizeof(dtmp), L"%d", did.fdid);
+		_stprintf_p(dtmp, sizeof(dtmp), L"%I64d", did.fdid);
 		fdids.push_back(dtmp);
 	}
 	wstring js = joinString(fdids, L'\\');
@@ -136,7 +136,7 @@ int RestoreDirsDate(sqlite3* db, vector<MyDid> vDids) {
 		INNER JOIN (SELECT max(cl.id) cid, cl.file_id fid FROM copy_logs cl \
 			WHERE cl.date_tag <= ? GROUP BY cl.file_id) fcl \
 			ON fcl.fid=f.id AND fcl.cid=cl.id \
-		WHERE f.parent_id IN (%id%) AND cl.flg_directory=1";
+		WHERE fd.parent_id IN (%id%) AND cl.flg_directory=1";
 	sql = sqlIn(sql, vDids);
 	if (sqlite3_prepare16_v3(db,
 		sql.data(),
@@ -167,13 +167,12 @@ int RestoreFiles(sqlite3_stmt* stmt) {
 		int flg_archive = sqlite3_column_int(stmt, 5);
 		int flg_hidden = sqlite3_column_int(stmt, 6);
 		int flg_symbol = sqlite3_column_int(stmt, 7);
-		wstring hashValue((const TCHAR*)sqlite3_column_text16(stmt, 8));
 
 		wstring srcFile = hostname + L"\\" + utf8_to_utf16(dateTag) + L"\\" + addHashDir(hashname) + L".data";
 		fdpath = joinString(splitString(fdpath, L'\\'));
 		wstring dstFile = TEXT("\\\\?\\") + szDstDrive + fdpath + TEXT("\\") + fname;
 		if (!PathFileExists(dstFile.c_str())
-			|| (flg_symbol ||  hashFile(dstFile) != hashValue)) {
+			|| (flg_symbol ||  mtime != GetFileTime(dstFile))) {
 			// ファイルを元に戻す
 			CopyFileEx(srcFile.c_str(), dstFile.c_str(), NULL, NULL, NULL, COPY_FILE_COPY_SYMLINK);
 			DWORD dwAttr = (flg_archive ? FILE_ATTRIBUTE_ARCHIVE : 0)
@@ -202,7 +201,7 @@ int RestoreFiles(sqlite3_stmt* stmt) {
 // 最新時刻の files リスト処理を実施する
 int RestoreFilesLast(sqlite3* db, const vector<MyDid> &vDids) {
 	sqlite3_stmt* stmt;
-	wstring sql = L"SELECT f.filename, fd.folder_path, f.hash_name, cl.mtime, cl.date_tag, cl.flg_archive, cl.flg_hidden, cl.flg_symbolic, cl.hash_value \
+	wstring sql = L"SELECT f.filename, fd.folder_path, f.hash_name, cl.mtime, cl.date_tag, cl.flg_archive, cl.flg_hidden, cl.flg_symbolic \
 		FROM copy_logs cl INNER JOIN files f ON cl.file_id=f.id \
 		INNER JOIN folders fd ON fd.id=f.folder_id \
 		WHERE (fd.parent_id IN (%id%) OR fd.id IN (%id%)) AND cl.flg_directory=0 AND cl.id=f.latest_copy_log_id";
@@ -221,7 +220,7 @@ int RestoreFilesLast(sqlite3* db, const vector<MyDid> &vDids) {
 int RestoreFilesDate(sqlite3* db, const vector<MyDid> vDids) {
 	string rsDate(utf16_to_utf8(restoreDate));
 	sqlite3_stmt* stmt;
-	wstring sql = L"SELECT f.filename, fd.folder_path, f.hash_name, cl.mtime, cl.date_tag, cl.flg_archive, cl.flg_hidden, cl.flg_symbolic, cl.hash_value \
+	wstring sql = L"SELECT f.filename, fd.folder_path, f.hash_name, cl.mtime, cl.date_tag, cl.flg_archive, cl.flg_hidden, cl.flg_symbolic \
 		FROM copy_logs cl INNER JOIN files f ON cl.file_id=f.id \
 		INNER JOIN folders fd ON fd.id=f.folder_id \
 		INNER JOIN (SELECT max(cl.id) cid, cl.file_id fid FROM copy_logs cl \
