@@ -17,6 +17,14 @@ DROP TABLE IF EXISTS drives;
 DROP TABLE IF EXISTS prohibits;
 DROP TABLE IF EXISTS groups;
 DROP TABLE IF EXISTS owners;
+DROP TABLE IF EXISTS backup_history;
+
+CREATE TABLE backup_history (
+	id integer primary key autoincrement,
+	date_tag date not null,
+	start_at datetime not null default current_timestamp,
+	end_at datetime
+);
 
 --- File owner
 CREATE TABLE owners (

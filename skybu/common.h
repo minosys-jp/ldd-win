@@ -28,11 +28,17 @@ BOOL CreateSql3Database(LPCTSTR lpctDB);
 #define DATABASE_NAME L"skybu.db"
 #define MAX_LONG_PATH 32768
 
+int64_t createBackupHistory(sqlite3* sql3, const string& dateTag);
+void finalizeBackupHistory(sqlite3* sql3, int64_t sessionId);
+tuple<int, string, string> getBackupHistory(sqlite3* sql3);
+
 extern BCRYPT_ALG_HANDLE hAlg;
 extern wstring hostname;
 extern wstring szRoot;
 extern wstring szSource;
 extern string dateTag;
+extern boolean isLastFinished;
+extern string last_startTime;
 
 struct MySid {
 	SID sid;

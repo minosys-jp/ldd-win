@@ -6,9 +6,13 @@
 #include <tlhelp32.h>
 #include <iostream>
 #include "common.h"
+//#include <thread>
 
 using namespace std;
 BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &dir, int64_t parent, const string &datetag);
+
+bool timedOut = false;
+VOID CALLBACK finishTimerCallback(PVOID lpParameter, BOOLEAN TimerOrWaitFired);
 
 int _tmain(int argc, LPCTSTR *argv)
 {
@@ -16,10 +20,38 @@ int _tmain(int argc, LPCTSTR *argv)
 
 	// Usage の確認
 	if (argc < 2) {
-		wcout << TEXT("Usage: skybu <source directory>") << endl;
+		wcout << TEXT("Usage: skybu <source directory> [time to finish(in minutes)]") << endl;
 		return 1;
 	}
 
+	// 処理時間の設定があればタイマーを開始する
+	HANDLE hTimerQueue = NULL;
+	HANDLE hTimer = NULL;
+	if (argc >= 3) {
+		int timeToFinish = 0;
+		try {
+			timeToFinish = stoi(argv[2]);
+		}
+		catch (const invalid_argument& e) {
+			wcout << TEXT("Invalid Time.") << std::endl;
+		}
+		catch (const out_of_range& e) {
+			wcout << TEXT("Time is out of range.") << endl;
+		}
+		if (timeToFinish > 0) {
+			hTimerQueue = CreateTimerQueue();
+			if (hTimerQueue == NULL) {
+				wcout << TEXT("CreateTimerQueue failed(") << GetLastError() << TEXT(")") << endl;
+				return 1;
+			}
+			if (!CreateTimerQueueTimer(&hTimer, hTimerQueue,
+				(WAITORTIMERCALLBACK)finishTimerCallback, NULL, timeToFinish * 60 * 1000, 0, 0)) {
+				wcout << TEXT("CreateTimerQueueTimer failed(") << GetLastError() << TEXT(")") << endl;
+				return 1;
+			}
+			wcout << TEXT("Time to finish = ") << argv[2] << endl;
+		}
+	}
 
 	if (!PathIsDirectory(argv[1])) {
 		wcout << TEXT("Source must be directory name.") << endl;
@@ -106,6 +138,22 @@ int _tmain(int argc, LPCTSTR *argv)
 		return 1;
 	}
 
+	// 過去のバックアップ履歴からスキップ判定に使う変数の値を決める
+	int ret;
+	string last_dateTag;
+	std::tie(ret, last_startTime, last_dateTag) = getBackupHistory(sql3);
+	if (ret < 0) {
+		wcout << TEXT("failed to get history data.") << endl;
+		sqlite3_close(sql3);
+		return 1;
+	} else {
+		isLastFinished = (ret == 0);
+		// 前回未完了ならdateTagを引き継ぐ
+		if (!isLastFinished) {
+			dateTag = last_dateTag;
+		}
+	}
+
 	vector<wstring> vecRoots;
 	if (FindRoot(vecRoots, szSource)) {
 		for (wstring drvstr : vecRoots) {
@@ -113,6 +161,7 @@ int _tmain(int argc, LPCTSTR *argv)
 				continue;
 			}
 			sqlite3_exec(sql3, "BEGIN TRANSACTION", NULL, NULL, NULL);
+			int64_t sessionId = createBackupHistory(sql3, dateTag);
 			MyFile root;
 			root.drive.UpdateDrives(sql3, szSource, drvstr);
 			// Root 登録
@@ -121,9 +170,17 @@ int _tmain(int argc, LPCTSTR *argv)
 				sqlite3_exec(sql3, "ROLLBACK", NULL, NULL, NULL);
 			}
 			else {
+				if (!timedOut) {
+					finalizeBackupHistory(sql3, sessionId);
+				}
 				sqlite3_exec(sql3, "COMMIT", NULL, NULL, NULL);
 			}
 		}
+	}
+
+	if (hTimerQueue != NULL) {
+		DeleteTimerQueueTimer(hTimerQueue, hTimer, NULL);
+		DeleteTimerQueueEx(hTimerQueue, NULL);
 	}
 	sqlite3_close(sql3);
 	BCryptCloseAlgorithmProvider(hAlg, 0);
@@ -132,6 +189,7 @@ int _tmain(int argc, LPCTSTR *argv)
 
 // バックアップ本体
 BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int64_t parent, const string &dateTag) {
+	set<MyFile> fileSet;
 	set<MyFile> dirSet;
 	set<wstring> exSet;
 	exSet.insert(TEXT("wsl"));
@@ -142,6 +200,8 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 	exSet.insert(TEXT("Temp"));
 	exSet.insert(TEXT(".."));
 	exSet.insert(TEXT("$RECYCLE.BIN"));
+
+//	this_thread::sleep_for(chrono::seconds(1));
 
 	// szTarget ディレクトリの一覧を取得する
 	WIN32_FIND_DATA ffd;
@@ -161,16 +221,17 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 		else if (exSet.find(ffd.cFileName) == exSet.cend()) {
 			file.setData(root, ffd.cFileName, ffd.dwFileAttributes);
 			if (!file.attr.flg_directory) {
-				// ファイルが通常orリンクファイルだったらファイル名をハッシュしてバックアップファイル名を得る
-				wstring hashPathName = hashFileName(file, false);
-
-				// 新規または以前と内容が変わっていたらファイルバックアップ
-				file.backupFileIfChanged(sql3, parent, hashPathName, dateTag);
+				// 取得したファイルがディレクトリだったら fileSet に追加する
+				fileSet.insert(file);
 			}
 			else if (file.attr.flg_directory) {
-				// 取得したファイルがディレクトリだったら set に追加する
+				// 取得したファイルがディレクトリだったら dirSet に追加する
 				dirSet.insert(file);
 			}
+		}
+		if (timedOut) {
+			FindClose(hFind);
+			return TRUE;
 		}
 	} while (FindNextFile(hFind, &ffd) != 0);
 	FindClose(hFind);
@@ -183,6 +244,23 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 	for (MyFile dir : dirSet) {
 		wcout << dir.path << endl;
 		BackupStart(sql3, hAlg, dir, parent, dateTag);
+
+		if (timedOut) {
+			return TRUE;
+		}
+	}
+
+	// fileSet が空でない場合、ファイル単位でバックアップする
+	for (MyFile file : fileSet) {
+		// ファイルが通常orリンクファイルだったらファイル名をハッシュしてバックアップファイル名を得る
+		wstring hashPathName = hashFileName(file, false);
+
+		// 新規または以前と内容が変わっていたらファイルバックアップ
+		file.backupFileIfChanged(sql3, parent, hashPathName, dateTag);
+
+		if (timedOut) {
+			return TRUE;
+		}
 	}
 	return TRUE;
 }
