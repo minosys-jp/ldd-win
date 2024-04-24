@@ -659,7 +659,7 @@ tuple<int, string, string> getBackupHistory(sqlite3* sql3)
 	// 1Œ–Ú‚Í’¼‹ß‚ÌŠ®—¹‰ñA‚Ü‚½‚ÍŠ®—¹‚µ‚½‚±‚Æ‚ª‚È‚¢ó‘Ô‚Å‚Ì‰‰ñ
 	if (sqlite3_step(stmt) == SQLITE_ROW) {
 		start_time= (const char*)sqlite3_column_text(stmt, 0);
-		end_time = (const char*)sqlite3_column_text(stmt, 1);
+		end_time = (sqlite3_column_bytes(stmt, 1) > 0) ? (const char*)sqlite3_column_text(stmt, 1) : "";
 		date_tag = (const char*)sqlite3_column_text(stmt, 2);
 		ret_value = (end_time != "") ? 0 : 1;
 
