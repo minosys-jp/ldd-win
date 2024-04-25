@@ -6,7 +6,6 @@
 #include <tlhelp32.h>
 #include <iostream>
 #include "common.h"
-//#include <thread>
 
 using namespace std;
 BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &dir, int64_t parent, const string &datetag);
@@ -34,9 +33,11 @@ int _tmain(int argc, LPCTSTR *argv)
 		}
 		catch (const invalid_argument& e) {
 			wcout << TEXT("Invalid Time.") << std::endl;
+			return 1;
 		}
 		catch (const out_of_range& e) {
 			wcout << TEXT("Time is out of range.") << endl;
+			return 1;
 		}
 		if (timeToFinish > 0) {
 			hTimerQueue = CreateTimerQueue();
@@ -62,7 +63,7 @@ int _tmain(int argc, LPCTSTR *argv)
 	// Hostname を取得
 	//hostname = whoAmI();
 	hostname = GetFileNameFromPath(szSource);
-	wcout << hostname << endl;
+	wcout << TEXT("host name=") << hostname << endl;
 
 	// Hostname フォルダが作成されているかチェック
 	if (!PathIsDirectory(hostname.c_str())) {
@@ -201,8 +202,6 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 	exSet.insert(TEXT(".."));
 	exSet.insert(TEXT("$RECYCLE.BIN"));
 
-//	this_thread::sleep_for(chrono::seconds(1));
-
 	// szTarget ディレクトリの一覧を取得する
 	WIN32_FIND_DATA ffd;
 	HANDLE hFind = INVALID_HANDLE_VALUE;
@@ -242,7 +241,7 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 
 	// set が空でない場合、BackupStart() を再帰的に呼び出す
 	for (MyFile dir : dirSet) {
-		wcout << dir.path << endl;
+		wcout << TEXT("directory=") << dir.path << endl;
 		BackupStart(sql3, hAlg, dir, parent, dateTag);
 
 		if (timedOut) {

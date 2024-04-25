@@ -449,7 +449,7 @@ void MyFile::recordDirIfChanged(sqlite3* sql3, const MyFile &root, int64_t paren
 		sqlite3_step(stmt);
 		sqlite3_finalize(stmt);
 	}
-	wcout << L"root_path=" << root.path << L"file_id=" << file_id << L"copy_log_id=" << cl_id << endl;
+	wcout << L"root_path=" << root.path << L", file_id=" << file_id << L", copy_log_id=" << cl_id << endl;
 }
 
 // 新規 or 更新ならバックアップ
