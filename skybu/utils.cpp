@@ -459,7 +459,7 @@ void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& h
 		L"SELECT l.*, f.folder_id FROM copy_logs l \
 		INNER JOIN files f ON f.id=l.file_id \
 		INNER JOIN (SELECT file_id, max(id) as id FROM copy_logs GROUP BY file_id) lm \
-		ON lm.file_id=l.file_id WHERE f.hash_name=?",
+		ON lm.file_id=l.file_id  AND l.id=lm.id WHERE f.hash_name=?",
 		-1, 0, &stmt, NULL) != SQLITE_OK) {
 		return;
 	}
@@ -468,15 +468,14 @@ void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& h
 	int64_t file_id = -1;
 	int64_t log_id = -1;
 	if (sqlite3_step(stmt) == SQLITE_ROW) {
+		string mtimeOld = (const char*)sqlite3_column_text(stmt, 3);
 		string created_at = (const char*)sqlite3_column_text(stmt, 10);
-		if (isLastFinished || (last_startTime.compare(created_at) >= 0)) {
-			string mtimeOld = (const char *)sqlite3_column_text(stmt, 3);
-			if (mtimeOld != utf16_to_utf8(this->attr.mtime)) {
-				// 更新ファイル
-				folder_id = sqlite3_column_int64(stmt, 11);
-				file_id = sqlite3_column_int64(stmt, 1);
-				log_id = createNewLogDBFile(sql3, file_id, dateTag);
-			}
+		if ((mtimeOld != utf16_to_utf8(this->attr.mtime)) &&
+			(isLastFinished || (last_startTime.compare(utf16_to_utf8(this->attr.mtime)) >= 0))) {
+			// 更新ファイル
+			folder_id = sqlite3_column_int64(stmt, 11);
+			file_id = sqlite3_column_int64(stmt, 1);
+			log_id = createNewLogDBFile(sql3, file_id, dateTag);
 		}
 	}
 	else {
