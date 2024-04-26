@@ -9,6 +9,8 @@
 
 using namespace std;
 BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &dir, int64_t parent, const string &datetag);
+BOOL BuildList(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile& root, int64_t parent, const string& dateTag);
+BOOL DoBackup(sqlite3* sql3, const MyFile& root, int64_t parent, const string& dateTag);
 
 bool timedOut = false;
 VOID CALLBACK finishTimerCallback(PVOID lpParameter, BOOLEAN TimerOrWaitFired);
@@ -189,7 +191,25 @@ int _tmain(int argc, LPCTSTR *argv)
 }
 
 // バックアップ本体
-BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int64_t parent, const string &dateTag) {
+BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile& root, int64_t parent, const string& dateTag) {
+
+	// 前回未完了ではないならばファイル一覧を構築する
+	if (isLastFinished) {
+		if (BuildList(sql3, hAlg, root, parent, dateTag) == FALSE) {
+			return FALSE;
+		}
+		if (timedOut) {
+			return FALSE;
+		}
+	}
+
+	// バックアップの実処理を呼び出す
+	DoBackup(sql3, root, parent, dateTag);
+
+	return TRUE;
+}
+
+BOOL BuildList(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile& root, int64_t parent, const string& dateTag) {
 	set<MyFile> fileSet;
 	set<MyFile> dirSet;
 	set<wstring> exSet;
@@ -216,7 +236,7 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 			// フォルダ自身を指定した場合
 			file.setData(root, L"", ffd.dwFileAttributes);
 			file.recordDirIfChanged(sql3, root, parent, dateTag);
-		} 
+		}
 		else if (exSet.find(ffd.cFileName) == exSet.cend()) {
 			file.setData(root, ffd.cFileName, ffd.dwFileAttributes);
 			if (!file.attr.flg_directory) {
@@ -224,13 +244,14 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 				fileSet.insert(file);
 			}
 			else if (file.attr.flg_directory) {
-				// 取得したファイルがディレクトリだったら dirSet に追加する
-				dirSet.insert(file);
+				// 取得したファイルがファイルだったら BuildList() を再帰的に呼び出す
+				wcout << TEXT("directory=") << file.path << endl;
+				BuildList(sql3, hAlg, file, parent, dateTag);
 			}
 		}
 		if (timedOut) {
 			FindClose(hFind);
-			return TRUE;
+			return FALSE;
 		}
 	} while (FindNextFile(hFind, &ffd) != 0);
 	FindClose(hFind);
@@ -239,15 +260,6 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 
 	// その場合は DB にも記録する
 
-	// set が空でない場合、BackupStart() を再帰的に呼び出す
-	for (MyFile dir : dirSet) {
-		wcout << TEXT("directory=") << dir.path << endl;
-		BackupStart(sql3, hAlg, dir, parent, dateTag);
-
-		if (timedOut) {
-			return TRUE;
-		}
-	}
 
 	// fileSet が空でない場合、ファイル単位でバックアップする
 	for (MyFile file : fileSet) {
@@ -255,11 +267,6 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 		wstring hashPathName = hashFileName(file, false);
 
 		// 新規または以前と内容が変わっていたらファイルバックアップ
-		file.backupFileIfChanged(sql3, parent, hashPathName, dateTag);
-
-		if (timedOut) {
-			return TRUE;
-		}
+		file.recordFileIfChanged(sql3, parent, hashPathName, dateTag);
 	}
-	return TRUE;
 }

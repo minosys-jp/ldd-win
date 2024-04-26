@@ -82,8 +82,9 @@ struct MyFile {
 	void setFlags(DWORD dwFlags);
 	void setData(const MyFile &parent, const wstring &filename);
 	void setData(const MyFile &parent, const wstring &filename, DWORD dwFlags);
-	void backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& hashPath, const string &dateTag);
+	void recordFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& hashPath, const string& dateTag);
 	void recordDirIfChanged(sqlite3* sql3, const MyFile &root, int64_t parent, const string &dateTag);
+	void recordFileDir(sqlite3* sql3, const string& dateTag, int64_t folder_id, int64_t file_id, const wstring& hashFile);
 	void backup(const wstring& hashPath);
 	int64_t createNewFolderDB(sqlite3* sql3, int64_t parent);
 	int64_t createNewFileDB(sqlite3* sql3, int64_t folder_id, const wstring& hashPath);
