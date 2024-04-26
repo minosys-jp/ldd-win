@@ -468,7 +468,7 @@ void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& h
 	int64_t file_id = -1;
 	int64_t log_id = -1;
 	if (sqlite3_step(stmt) == SQLITE_ROW) {
-		string mtimeOld = (const char*)sqlite3_column_text(stmt, 3);
+		string mtimeOld = (const char *)sqlite3_column_text(stmt, 3);
 		string created_at = (const char*)sqlite3_column_text(stmt, 10);
 		if ((mtimeOld != utf16_to_utf8(this->attr.mtime)) &&
 			(isLastFinished || (last_startTime.compare(utf16_to_utf8(this->attr.mtime)) >= 0))) {
@@ -633,7 +633,7 @@ void finalizeBackupHistory(sqlite3* sql3, int64_t sessionId) {
 //
 // ret_val: 0:前回は完了した/履歴がなかった
 //          1:前回は完了しなかった
-//          2:エラー発生
+//         -1:エラー発生
 // start_time: 未完了のバックアップの初回の開始日時（前回完了しなかった場合のみ有効）
 // date_tag  : 未完了のバックアップの初回のdate_tag（前回完了しなかった場合のみ有効）
 tuple<int, string, string> getBackupHistory(sqlite3* sql3)

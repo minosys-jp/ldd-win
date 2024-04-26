@@ -220,7 +220,7 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 		else if (exSet.find(ffd.cFileName) == exSet.cend()) {
 			file.setData(root, ffd.cFileName, ffd.dwFileAttributes);
 			if (!file.attr.flg_directory) {
-				// 取得したファイルがディレクトリだったら fileSet に追加する
+				// 取得したファイルがファイルだったら fileSet に追加する
 				fileSet.insert(file);
 			}
 			else if (file.attr.flg_directory) {
