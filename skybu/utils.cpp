@@ -11,6 +11,8 @@ wstring szRoot;
 wstring szSource;
 string dateTag;
 char* sqlite3_temp_directory;
+boolean isLastFinished;
+string last_startTime;
 
 // ディレクトリをベクタに分解する
 vector<wstring> splitString(const wstring& ss, wchar_t delim) {
@@ -237,6 +239,15 @@ BOOL CreateSql3Database(LPCTSTR lpctFile) {
 	return TRUE;
 }
 
+extern bool timedOut;
+
+// 処理終了時間に呼び出されるコールバック関数
+VOID CALLBACK finishTimerCallback(PVOID lpParameter, BOOLEAN TimerOrWaitFired)
+{
+	timedOut = true;
+	wcout << TEXT("Time has come.") << endl;
+}
+
 // drive 情報を更新する
 void MyDrive::UpdateDrives(sqlite3* sql, const wstring& arg, const wstring &drv) {
 	this->name = drv;
@@ -438,7 +449,7 @@ void MyFile::recordDirIfChanged(sqlite3* sql3, const MyFile &root, int64_t paren
 		sqlite3_step(stmt);
 		sqlite3_finalize(stmt);
 	}
-	wcout << L"root_path=" << root.path << L"file_id=" << file_id << L"copy_log_id=" << cl_id << endl;
+	wcout << L"root_path=" << root.path << L", file_id=" << file_id << L", copy_log_id=" << cl_id << endl;
 }
 
 // 新規 or 更新ならバックアップ
@@ -448,7 +459,7 @@ void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& h
 		L"SELECT l.*, f.folder_id FROM copy_logs l \
 		INNER JOIN files f ON f.id=l.file_id \
 		INNER JOIN (SELECT file_id, max(id) as id FROM copy_logs GROUP BY file_id) lm \
-		ON lm.file_id=l.file_id WHERE f.hash_name=?",
+		ON lm.file_id=l.file_id  AND l.id=lm.id WHERE f.hash_name=?",
 		-1, 0, &stmt, NULL) != SQLITE_OK) {
 		return;
 	}
@@ -458,7 +469,9 @@ void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& h
 	int64_t log_id = -1;
 	if (sqlite3_step(stmt) == SQLITE_ROW) {
 		string mtimeOld = (const char *)sqlite3_column_text(stmt, 3);
-		if (mtimeOld != utf16_to_utf8(this->attr.mtime)) {
+		string created_at = (const char*)sqlite3_column_text(stmt, 10);
+		if ((mtimeOld != utf16_to_utf8(this->attr.mtime)) &&
+			(isLastFinished || (last_startTime.compare(utf16_to_utf8(this->attr.mtime)) >= 0))) {
 			// 更新ファイル
 			folder_id = sqlite3_column_int64(stmt, 11);
 			file_id = sqlite3_column_int64(stmt, 1);
@@ -466,10 +479,12 @@ void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& h
 		}
 	}
 	else {
-		// 新規ファイル
-		folder_id = createNewFolderDB(sql3, parent);
-		file_id = createNewFileDB(sql3, folder_id, hashPath);
-		log_id = createNewLogDBFile(sql3, file_id, dateTag);
+		if (isLastFinished || (last_startTime.compare(utf16_to_utf8(this->attr.mtime)) >= 0)) {
+			// 新規ファイル
+			folder_id = createNewFolderDB(sql3, parent);
+			file_id = createNewFileDB(sql3, folder_id, hashPath);
+			log_id = createNewLogDBFile(sql3, file_id, dateTag);
+		}
 	}
 
 	sqlite3_finalize(stmt);
@@ -593,4 +608,75 @@ void MyFile::backup(const wstring& hashFile) {
 	}
 	wstring file = dir + L"\\" + hashFile + L".data";
 	CopyFileEx(this->getPath().c_str(), file.c_str(), NULL, NULL, NULL, COPY_FILE_COPY_SYMLINK);
+}
+
+// バックアップ履歴を登録する
+int64_t createBackupHistory(sqlite3* sql3, const string& dateTag) {
+	sqlite3_stmt* stmt;
+	sqlite3_prepare16_v3(sql3, L"INSERT INTO backup_history (date_tag) VALUES (?)", -1, 0, &stmt, NULL);
+	sqlite3_bind_text(stmt, 1, dateTag.data(), dateTag.length(), NULL);
+	sqlite3_step(stmt);
+	sqlite3_finalize(stmt);
+	return sqlite3_last_insert_rowid(sql3);
+}
+
+// 今回のバックアップ履歴に終了日時を登録する
+void finalizeBackupHistory(sqlite3* sql3, int64_t sessionId) {
+	sqlite3_stmt* stmt;
+	sqlite3_prepare16_v3(sql3, L"UPDATE backup_history SET end_at=CURRENT_TIMESTAMP WHERE id=?", -1, 0, &stmt, NULL);
+	sqlite3_bind_int64(stmt, 1, sessionId);
+	sqlite3_step(stmt);
+	sqlite3_finalize(stmt);
+}
+
+// スキップ判定に使う情報をバックアップ履歴から取得する
+//
+// ret_val: 0:前回は完了した/履歴がなかった
+//          1:前回は完了しなかった
+//         -1:エラー発生
+// start_time: 未完了のバックアップの初回の開始日時（前回完了しなかった場合のみ有効）
+// date_tag  : 未完了のバックアップの初回のdate_tag（前回完了しなかった場合のみ有効）
+tuple<int, string, string> getBackupHistory(sqlite3* sql3)
+{
+	sqlite3_stmt* stmt;
+	int ret_value = -1;
+	string start_time= "";
+	string end_time = "";
+	string date_tag = "";
+
+	if (sqlite3_prepare16_v3(sql3,
+		L"SELECT backup_history.start_at, backup_history.end_at, backup_history.date_tag \
+		FROM backup_history \
+		INNER JOIN(SELECT date_tag, start_at, max(end_at) AS end_at FROM backup_history) finished \
+		ON IIF (finished.end_at IS NOT NULL, backup_history.start_at>=finished.start_at, TRUE) \
+		ORDER BY backup_history.start_at \
+		LIMIT 2",
+		-1, 0, &stmt, NULL) != SQLITE_OK) {
+		return forward_as_tuple(ret_value, start_time, date_tag);
+	}
+
+	// 1件目は直近の完了回、または完了したことがない状態での初回
+	if (sqlite3_step(stmt) == SQLITE_ROW) {
+		start_time= (const char*)sqlite3_column_text(stmt, 0);
+		end_time = (sqlite3_column_bytes(stmt, 1) > 0) ? (const char*)sqlite3_column_text(stmt, 1) : "";
+		date_tag = (const char*)sqlite3_column_text(stmt, 2);
+		ret_value = (end_time != "") ? 0 : 1;
+
+		// 2件目が直近の未完了バックアップの初回（1件目は直近の完了回）
+		if (ret_value == 0) {
+			if (sqlite3_step(stmt) == SQLITE_ROW) {
+				start_time = ((const char*)sqlite3_column_text(stmt, 0));
+				date_tag = ((const char*)sqlite3_column_text(stmt, 2));
+				ret_value = 1;
+			}
+		}
+	}
+	else {
+		// 履歴が1件もなければ前回完了と同じ扱いにする
+		ret_value = 0;
+	}
+
+	sqlite3_finalize(stmt);
+
+	return forward_as_tuple(ret_value, start_time, date_tag);
 }
