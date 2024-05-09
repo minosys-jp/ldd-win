@@ -9,6 +9,7 @@ DROP INDEX IF EXISTS files_owner_idx;
 DROP INDEX IF EXISTS foldername_idx;
 DROP INDEX IF EXISTS folders_hash_idx;
 DROP INDEX IF EXISTS date_tag_idx;
+DROP INDEX IF EXISTS files_to_copy_idx;
 DROP TABLE IF EXISTS copy_logs;
 DROP TABLE IF EXISTS file_group;
 DROP TABLE IF EXISTS files;
@@ -116,3 +117,4 @@ CREATE TABLE files_to_copy (
 	hash_name varchar(64) not null,
 	created_at datetime not null default current_timestamp
 );
+CREATE UNIQUE INDEX files_to_copy_idx on files_to_copy(date_tag, file_id);
