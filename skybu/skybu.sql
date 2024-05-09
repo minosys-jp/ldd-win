@@ -9,6 +9,7 @@ DROP INDEX IF EXISTS files_owner_idx;
 DROP INDEX IF EXISTS foldername_idx;
 DROP INDEX IF EXISTS folders_hash_idx;
 DROP INDEX IF EXISTS date_tag_idx;
+DROP INDEX IF EXISTS files_to_copy_idx;
 DROP TABLE IF EXISTS copy_logs;
 DROP TABLE IF EXISTS file_group;
 DROP TABLE IF EXISTS files;
@@ -18,12 +19,14 @@ DROP TABLE IF EXISTS prohibits;
 DROP TABLE IF EXISTS groups;
 DROP TABLE IF EXISTS owners;
 DROP TABLE IF EXISTS backup_history;
+DROP TABLE IF EXISTS files_to_copy;
 
+--- history of backup execution
 CREATE TABLE backup_history (
 	id integer primary key autoincrement,
 	date_tag date not null,
 	start_at datetime not null default current_timestamp,
-	end_at datetime
+	end_at datetime default null
 );
 
 --- File owner
@@ -101,3 +104,17 @@ CREATE TABLE file_group (
 	file_group_id integer not null
 );
 
+--- list of files to copy
+CREATE TABLE files_to_copy (
+	id integer primary key autoincrement,
+	date_tag date not null,
+	folder_id integer not null,
+	file_id integer not null,
+	flg_symbolic integer(1) default 0,
+	flg_directory integer(1) default 0,
+	flg_archive integer(1) default 0,
+	flg_hidden integer(1) default 0,
+	hash_name varchar(64) not null,
+	created_at datetime not null default current_timestamp
+);
+CREATE UNIQUE INDEX files_to_copy_idx on files_to_copy(date_tag, file_id);

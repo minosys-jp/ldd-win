@@ -8,34 +8,35 @@
 #include "common.h"
 
 using namespace std;
-BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &dir, int64_t parent, const string &datetag);
+BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, MyFile &dir, int64_t parent, const string &datetag);
+BOOL BuildList(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile& root, int64_t parent, const string& dateTag);
 
 bool timedOut = false;
 VOID CALLBACK finishTimerCallback(PVOID lpParameter, BOOLEAN TimerOrWaitFired);
 
-int _tmain(int argc, LPCTSTR *argv)
+int _tmain(int argc, LPCTSTR* argv)
 {
 	setlocale(LC_ALL, "Japanese");
 
 	// Usage の確認
-	if (argc < 2) {
-		wcout << TEXT("Usage: skybu <source directory> [time to finish(in minutes)]") << endl;
+	if (argc < 4) {
+		wcout << TEXT("Usage: skybu <source directory> <dst Drive> [time to finish(in minutes)]") << endl;
 		return 1;
 	}
-
+	dstDrive = wstring(argv[2]) + L":\\Skyster\\skybu\\";
 	// 処理時間の設定があればタイマーを開始する
 	HANDLE hTimerQueue = NULL;
 	HANDLE hTimer = NULL;
-	if (argc >= 3) {
+	if (argc >= 4) {
 		int timeToFinish = 0;
 		try {
-			timeToFinish = stoi(argv[2]);
+			timeToFinish = stoi(argv[3]);
 		}
-		catch (const invalid_argument& e) {
+		catch (const invalid_argument&) {
 			wcout << TEXT("Invalid Time.") << std::endl;
 			return 1;
 		}
-		catch (const out_of_range& e) {
+		catch (const out_of_range&) {
 			wcout << TEXT("Time is out of range.") << endl;
 			return 1;
 		}
@@ -50,24 +51,26 @@ int _tmain(int argc, LPCTSTR *argv)
 				wcout << TEXT("CreateTimerQueueTimer failed(") << GetLastError() << TEXT(")") << endl;
 				return 1;
 			}
-			wcout << TEXT("Time to finish = ") << argv[2] << endl;
+			wcout << TEXT("Time to finish = ") << argv[3] << endl;
 		}
 	}
 
+	wcout << argv[1] << endl;
 	if (!PathIsDirectory(argv[1])) {
 		wcout << TEXT("Source must be directory name.") << endl;
 		return 1;
 	}
-	szSource = argv[1];
+	srcDrive = GetDriveNameFromPath(argv[1]);
+	srcDir = GetDirNameFromPath(argv[1]);
 
 	// Hostname を取得
-	//hostname = whoAmI();
-	hostname = GetFileNameFromPath(szSource);
+	hostname = whoAmI();
+	//hostname = GetFileNameFromPath(szSource);
 	wcout << TEXT("host name=") << hostname << endl;
 
 	// Hostname フォルダが作成されているかチェック
-	if (!PathIsDirectory(hostname.c_str())) {
-		if (!CreateDirectory(hostname.c_str(), NULL)) {
+	if (!PathIsDirectory((dstDrive + hostname).c_str())) {
+		if (!CreateDirectory((dstDrive + hostname).c_str(), NULL)) {
 			wcout << TEXT("Failed to create hostname directory.") << endl;
 			return 1;
 		}
@@ -76,7 +79,7 @@ int _tmain(int argc, LPCTSTR *argv)
 	// sqlite3 database file をチェック
 	LPTSTR zPath = (LPTSTR)HeapAlloc(GetProcessHeap(), 0, (MAX_PATH + 1) * sizeof(TCHAR));
 	GetTempPath(MAX_PATH + 1, zPath);
-	char *zPathChar = (char*)HeapAlloc(GetProcessHeap(), 0, (MAX_PATH + 1) * sizeof(TCHAR));
+	char* zPathChar = (char*)HeapAlloc(GetProcessHeap(), 0, (MAX_PATH + 1) * sizeof(TCHAR));
 	WideCharToMultiByte(CP_UTF8, 0, zPath, -1, zPathChar, (MAX_PATH + 1) * sizeof(TCHAR),
 		NULL, NULL);
 	sqlite3_temp_directory = sqlite3_mprintf("%s", zPathChar);
@@ -88,7 +91,7 @@ int _tmain(int argc, LPCTSTR *argv)
 		wcout << TEXT("Failed to allocate memory.") << endl;
 		return 1;
 	}
-	wcsncpy_s(databasePath, MAX_PATH + 1, hostname.data(), hostname.length());
+	wcsncpy_s(databasePath, MAX_PATH + 1, (dstDrive + hostname).data(), (dstDrive + hostname).length());
 	PathCchAppend(databasePath, MAX_PATH, DATABASE_NAME);
 	if (!PathFileExists(databasePath)) {
 		if (!CreateSql3Database(databasePath)) {
@@ -108,7 +111,7 @@ int _tmain(int argc, LPCTSTR *argv)
 		GetLocalTime(&systime);
 		TCHAR szCurrent[11];
 		wsprintf(szCurrent, L"%04d-%02d-%02d", systime.wYear, systime.wMonth, systime.wDay);
-		PathCchCombine(szRootB, MAX_PATH + 1, hostname.c_str(), szCurrent);
+		PathCchCombine(szRootB, MAX_PATH + 1, (dstDrive + hostname).c_str(), szCurrent);
 		if (!PathFileExists(szRootB)) {
 			if (!CreateDirectory(szRootB, NULL)) {
 				wcout << TEXT("Failed to create ") << szCurrent << " folder." << endl;
@@ -147,7 +150,8 @@ int _tmain(int argc, LPCTSTR *argv)
 		wcout << TEXT("failed to get history data.") << endl;
 		sqlite3_close(sql3);
 		return 1;
-	} else {
+	}
+	else {
 		isLastFinished = (ret == 0);
 		// 前回未完了ならdateTagを引き継ぐ
 		if (!isLastFinished) {
@@ -155,27 +159,23 @@ int _tmain(int argc, LPCTSTR *argv)
 		}
 	}
 
-	vector<wstring> vecRoots;
-	if (FindRoot(vecRoots, szSource)) {
-		for (wstring drvstr : vecRoots) {
-			if (drvstr.length() != 1) {
-				continue;
+	{
+		wstring drvstr = srcDrive.empty() ? TEXT("C") : srcDrive;
+		sqlite3_exec(sql3, "BEGIN TRANSACTION", NULL, NULL, NULL);
+		int64_t sessionId = createBackupHistory(sql3, dateTag);
+		MyFile root;
+		root.drive.UpdateDrives(sql3, drvstr);
+		root.dname = srcDir;
+		// Root 登録
+		int64_t parent = root.createNewFolderDB(sql3, -1LL);
+		if (!BackupStart(sql3, hAlg, root, parent, dateTag)) {
+			sqlite3_exec(sql3, "ROLLBACK", NULL, NULL, NULL);
+		}
+		else {
+			if (!timedOut) {
+				finalizeBackupHistory(sql3, sessionId);
 			}
-			sqlite3_exec(sql3, "BEGIN TRANSACTION", NULL, NULL, NULL);
-			int64_t sessionId = createBackupHistory(sql3, dateTag);
-			MyFile root;
-			root.drive.UpdateDrives(sql3, szSource, drvstr);
-			// Root 登録
-			int64_t parent = root.createNewFolderDB(sql3, -1LL);
-			if (!BackupStart(sql3, hAlg, root, parent, dateTag)) {
-				sqlite3_exec(sql3, "ROLLBACK", NULL, NULL, NULL);
-			}
-			else {
-				if (!timedOut) {
-					finalizeBackupHistory(sql3, sessionId);
-				}
-				sqlite3_exec(sql3, "COMMIT", NULL, NULL, NULL);
-			}
+			sqlite3_exec(sql3, "COMMIT", NULL, NULL, NULL);
 		}
 	}
 
@@ -189,7 +189,22 @@ int _tmain(int argc, LPCTSTR *argv)
 }
 
 // バックアップ本体
-BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int64_t parent, const string &dateTag) {
+BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, MyFile& root, int64_t parent, const string& dateTag) {
+
+	// 前回未完了ではないならばファイル一覧を構築する
+	if (isLastFinished) {
+		if (BuildList(sql3, hAlg, root, parent, dateTag) == FALSE) {
+			return FALSE;
+		}
+		if (timedOut) {
+			return FALSE;
+		}
+	}
+
+	return TRUE;
+}
+
+BOOL BuildList(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile& root, int64_t parent, const string& dateTag) {
 	set<MyFile> fileSet;
 	set<MyFile> dirSet;
 	set<wstring> exSet;
@@ -211,12 +226,12 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 		return FALSE;
 	}
 	do {
-		MyFile file(root.drive);
+		MyFile file(root.drive, root.dname);
 		if (wstring(L".") == ffd.cFileName) {
 			// フォルダ自身を指定した場合
 			file.setData(root, L"", ffd.dwFileAttributes);
 			file.recordDirIfChanged(sql3, root, parent, dateTag);
-		} 
+		}
 		else if (exSet.find(ffd.cFileName) == exSet.cend()) {
 			file.setData(root, ffd.cFileName, ffd.dwFileAttributes);
 			if (!file.attr.flg_directory) {
@@ -224,30 +239,27 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 				fileSet.insert(file);
 			}
 			else if (file.attr.flg_directory) {
-				// 取得したファイルがディレクトリだったら dirSet に追加する
+				// ファイル名をディレクトリに移す
+				file.dname += TEXT("\\") + file.fname;
+				file.fname.clear();
 				dirSet.insert(file);
 			}
 		}
 		if (timedOut) {
 			FindClose(hFind);
-			return TRUE;
+			return FALSE;
 		}
 	} while (FindNextFile(hFind, &ffd) != 0);
 	FindClose(hFind);
 
 	// ハッシュフォルダが構成されていなかったらフォルダ作成
+	for (MyFile dir : dirSet) {
+		BuildList(sql3, hAlg, dir, parent, dateTag);
+	}
+				// 取得したファイルがファイルだったら BuildList() を再帰的に呼び出す
 
 	// その場合は DB にも記録する
 
-	// set が空でない場合、BackupStart() を再帰的に呼び出す
-	for (MyFile dir : dirSet) {
-		wcout << TEXT("directory=") << dir.path << endl;
-		BackupStart(sql3, hAlg, dir, parent, dateTag);
-
-		if (timedOut) {
-			return TRUE;
-		}
-	}
 
 	// fileSet が空でない場合、ファイル単位でバックアップする
 	for (MyFile file : fileSet) {
@@ -255,11 +267,7 @@ BOOL BackupStart(sqlite3* sql3, BCRYPT_ALG_HANDLE hAlg, const MyFile &root, int6
 		wstring hashPathName = hashFileName(file, false);
 
 		// 新規または以前と内容が変わっていたらファイルバックアップ
-		file.backupFileIfChanged(sql3, parent, hashPathName, dateTag);
-
-		if (timedOut) {
-			return TRUE;
-		}
+		file.recordFileIfChanged(sql3, parent, hashPathName, dateTag);
 	}
 	return TRUE;
 }

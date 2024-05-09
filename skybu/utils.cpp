@@ -8,11 +8,13 @@ using namespace std;
 BCRYPT_ALG_HANDLE hAlg;
 wstring hostname;
 wstring szRoot;
-wstring szSource;
+wstring srcDrive;
+wstring srcDir;
 string dateTag;
 char* sqlite3_temp_directory;
 boolean isLastFinished;
 string last_startTime;
+wstring dstDrive(L"D:\\Skyster\\skybu\\");
 
 // ディレクトリをベクタに分解する
 vector<wstring> splitString(const wstring& ss, wchar_t delim) {
@@ -37,32 +39,13 @@ wstring joinString(const vector<wstring>& svec, wchar_t delim) {
 	return ss.str();
 }
 
-BOOL FindRoot(vector<wstring>& v, const wstring &arg) {
-	WIN32_FIND_DATA ffd;
-	TCHAR szDir[MAX_PATH];
-	size_t lengthOfArg;
-	HANDLE hFind = INVALID_HANDLE_VALUE;
-
-	StringCchLength(arg.c_str(), MAX_PATH, &lengthOfArg);
-	if (lengthOfArg <= (MAX_PATH - 3)) {
-		StringCchCopy(szDir, MAX_PATH, arg.c_str());
-		StringCchCat(szDir, MAX_PATH, TEXT("\\*"));
-		hFind = FindFirstFile(szDir, &ffd);
-		do {
-			if (hFind != INVALID_HANDLE_VALUE) {
-				if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-					if (_tcscmp(ffd.cFileName, TEXT(".")) != 0
-						&& _tcscmp(ffd.cFileName, TEXT("..")) != 0) {
-						v.push_back(ffd.cFileName);
-					}
-				}
-			}
-		} while (FindNextFile(hFind, &ffd) != 0);
-		if (hFind != INVALID_HANDLE_VALUE && GetLastError() == ERROR_NO_MORE_FILES) {
-			FindClose(hFind);
-		}
+BOOL FindRoot(wstring& drvstr, const wstring &arg) {
+	size_t drvPos = arg.find(L':');
+	if (drvPos == wstring::npos) {
+		return FALSE;
 	}
-	return !v.empty();
+	drvstr = arg.substr(0, drvPos);
+	return TRUE;
 }
 
 // ホスト名を取得する
@@ -103,34 +86,9 @@ wstring GetDriveNameFromPath(const wstring &pathName) {
 	return wstring() + buff[0];
 }
 
-//ファイル名からディレクトリ名を取り出す
-wstring GetDirNameFromPath(const wstring& pathName, int64_t parent) {
-	vector<wstring> vNames(splitString(pathName, L'\\'));
-
-	// source, hostname, drive-name をスキップする
-	if (vNames.size() >= 3) {
-		vNames.erase(vNames.begin(), vNames.begin() + 3);
-	}
-	// parent ではない場合は最後はファイル名なのでスキップする
-	if (!vNames.empty() && parent != -1LL) {
-		vNames.pop_back();
-	}
-	// joinString の先頭のバックスラッシュを取り除く
-	wstring rws = joinString(vNames, L'\\');
-	return rws.empty() ? rws : rws.substr(1);
-}
-
-wstring GetPathWithoutHostname(const wstring& pathName) {
-	vector<wstring> svec = splitString(pathName, L'\\');
-	vector<wstring>::iterator it = svec.begin();
-	if (svec.size() > 0 && svec[0].empty()) {
-		svec.erase(it, it + 1);
-		it = svec.begin();
-	}
-	if (svec.size() > 0) {
-		svec.erase(it, it + 1);
-	}
-	return joinString(svec, L'\\');
+wstring GetDirNameFromPath(const wstring& path) {
+	vector<wstring> vPath = splitString(path, L':');
+	return vPath.at(vPath.empty() ? 0 : 1);
 }
 
 // ファイル名からファイル部分を取り出す
@@ -208,8 +166,7 @@ wstring hashDirName(const wstring &guid, const wstring &dirName, bool flg_root) 
 */
 
 wstring hashFileName(const MyFile& file, bool flg_root) {
-	wstring s = file.drive.guid + TEXT("\\") + file.path;
-	stringstream ss = stringstream(utf16_to_utf8(s));
+	stringstream ss = stringstream(utf16_to_utf8(file.getPath()));
 	return hashStream(ss);
 }
 
@@ -218,20 +175,20 @@ BOOL CreateSql3Database(LPCTSTR lpctFile) {
 	if (!PathFileExists(lpctFile)) {
 		sqlite3* sql3Handle = NULL;
 		if (sqlite3_open16(lpctFile, &sql3Handle) != SQLITE_OK) {
-			wcout << TEXT("Failed to open ") << DATABASE_SCHEMA << TEXT(".") << endl;
+			std::wcout << TEXT("Failed to open ") << DATABASE_SCHEMA << TEXT(".") << endl;
 			return FALSE;
 		}
 		ifstream ifs;
 		ifs.open(DATABASE_SCHEMA);
 		if (ifs.fail()) {
-			wcout << TEXT("Failed to open schema file.") << endl;
+			std::wcout << TEXT("Failed to open schema file.") << endl;
 			return FALSE;
 		}
 		stringstream ss;
 		ss << ifs.rdbuf();
 		ifs.close();
 		if (sqlite3_exec(sql3Handle, ss.str().c_str(), NULL, NULL, NULL) != SQLITE_OK) {
-			wcout << TEXT("Failed to create database schema.") << endl;
+			std::wcout << TEXT("Failed to create database schema.") << endl;
 			return FALSE;
 		}
 		sqlite3_close(sql3Handle);
@@ -245,22 +202,14 @@ extern bool timedOut;
 VOID CALLBACK finishTimerCallback(PVOID lpParameter, BOOLEAN TimerOrWaitFired)
 {
 	timedOut = true;
-	wcout << TEXT("Time has come.") << endl;
+	std::wcout << TEXT("Time has come.") << endl;
 }
 
 // drive 情報を更新する
-void MyDrive::UpdateDrives(sqlite3* sql, const wstring& arg, const wstring &drv) {
+void MyDrive::UpdateDrives(sqlite3* sql, const wstring &drv) {
 	this->name = drv;
 	this->name[0] = this->name[0] & ~0x0020;
 	this->guid = hostname + L"\\" + name;
-	/*
-	// arg からドライブ番号を取得する
-	this->name = GetDriveNameFromPath(arg);
-	if (this->name.empty()) {
-		return;
-	}
-	this->guid = driveToGuid(this->name.at(0));
-	*/
 
 	sqlite3_stmt* stmt;
 	if (sqlite3_prepare16_v3(sql,
@@ -292,21 +241,17 @@ void MyDrive::UpdateDrives(sqlite3* sql, const wstring& arg, const wstring &drv)
 
 void MyFile::setFname(const MyFile &parent, const wstring &filename) {
 	if (filename.empty()) {
-		this->path = TEXT("");
-		this->fname = filename;
+		this->dname = parent.dname;
+		this->fname = TEXT("");
 	} else {
+		this->fname = filename;
+		this->dname = parent.dname;
 		LPTSTR lpLongData = (LPTSTR)HeapAlloc(GetProcessHeap(), 0, (MAX_LONG_PATH + 1) * sizeof(TCHAR));
-		wstring szMerged = parent.getPath() + TEXT("\\") + filename;
-		GetLongPathName(szMerged.c_str(), lpLongData, MAX_LONG_PATH + 1);
-		vector<wstring> vPath = splitString(lpLongData, L':');
-		vPath = splitString(vPath.at(1), L'\\');
-		if (vPath.at(0).empty()) {
-			vPath.erase(vPath.begin(), vPath.begin() + 1);
+		if (lpLongData) {
+			GetLongPathName(this->getPath().c_str(), lpLongData, MAX_LONG_PATH + 1);
+			this->fname = PathFindFileName(lpLongData);
+			HeapFree(GetProcessHeap(), 0, lpLongData);
 		}
-		vPath.erase(vPath.begin(), vPath.begin() + 2);
-		this->path = joinString(vPath, L'\\');
-		this->fname = PathFindFileName(lpLongData);
-		HeapFree(GetProcessHeap(), 0, lpLongData);
 	}
 }
 
@@ -361,7 +306,7 @@ void MyFile::recordDirIfChanged(sqlite3* sql3, const MyFile &root, int64_t paren
 		-1, 0, &stmt, NULL) != SQLITE_OK) {
 		return;
 	}
-	wstring rpath = root.path.empty() ? TEXT("?root?") : root.path;
+	wstring rpath = root.dname;
 	sqlite3_bind_int64(stmt, 1, root.drive.id);
 	sqlite3_bind_text16(stmt, 2, rpath.data(), rpath.length() * sizeof(TCHAR), NULL);
 	int64_t folder_id = -1;
@@ -449,11 +394,26 @@ void MyFile::recordDirIfChanged(sqlite3* sql3, const MyFile &root, int64_t paren
 		sqlite3_step(stmt);
 		sqlite3_finalize(stmt);
 	}
-	wcout << L"root_path=" << root.path << L", file_id=" << file_id << L", copy_log_id=" << cl_id << endl;
+	std::wcout << L"root_path=" << root.getPath() << L", file_id=" << file_id << L", copy_log_id=" << cl_id << endl;
+}
+
+// 未完了ファイル一覧テーブルにレコードを登録する
+void MyFile::recordFileDir(sqlite3* sql3, const string& dateTag, int64_t folder_id, int64_t file_id, const wstring& hashFile) {
+	sqlite3_stmt* stmt;
+	sqlite3_prepare16_v3(sql3,
+		L"INSERT INTO files_to_copy (date_tag, folder_id, file_id, flg_symbolic, flg_archive, flg_hidden, hash_name) VALUES(?, ?, ?, ?, ?, ?, ?)", -1, 0, &stmt, NULL);
+	sqlite3_bind_text(stmt, 1, dateTag.data(), dateTag.length(), NULL);
+	sqlite3_bind_int64(stmt, 2, folder_id);
+	sqlite3_bind_int64(stmt, 3, file_id);
+	sqlite3_bind_int(stmt, 4, attr.flg_symbolic);
+	sqlite3_bind_int(stmt, 5, attr.flg_archive);
+	sqlite3_bind_int(stmt, 6, attr.flg_hidden);
+	sqlite3_bind_text16(stmt, 7, hashFile.data(), hashFile.length() * sizeof(TCHAR), NULL);
+	sqlite3_step(stmt);
 }
 
 // 新規 or 更新ならバックアップ
-void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& hashPath, const string &dateTag) {
+void MyFile::recordFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& hashPath, const string &dateTag) {
 	sqlite3_stmt* stmt;
 	if (sqlite3_prepare16_v3(sql3,
 		L"SELECT l.*, f.folder_id FROM copy_logs l \
@@ -466,7 +426,7 @@ void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& h
 	sqlite3_bind_text16(stmt, 1, hashPath.data(), hashPath.length() * sizeof(TCHAR), NULL);
 	int64_t folder_id = -1;
 	int64_t file_id = -1;
-	int64_t log_id = -1;
+	boolean isChanged = false;
 	if (sqlite3_step(stmt) == SQLITE_ROW) {
 		string mtimeOld = (const char *)sqlite3_column_text(stmt, 3);
 		string created_at = (const char*)sqlite3_column_text(stmt, 10);
@@ -475,7 +435,7 @@ void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& h
 			// 更新ファイル
 			folder_id = sqlite3_column_int64(stmt, 11);
 			file_id = sqlite3_column_int64(stmt, 1);
-			log_id = createNewLogDBFile(sql3, file_id, dateTag);
+			isChanged = true;
 		}
 	}
 	else {
@@ -483,28 +443,45 @@ void MyFile::backupFileIfChanged(sqlite3* sql3, int64_t parent, const wstring& h
 			// 新規ファイル
 			folder_id = createNewFolderDB(sql3, parent);
 			file_id = createNewFileDB(sql3, folder_id, hashPath);
-			log_id = createNewLogDBFile(sql3, file_id, dateTag);
+			isChanged = true;
 		}
 	}
 
 	sqlite3_finalize(stmt);
-	if (log_id != -1) {
-		sqlite3_prepare16_v3(sql3,
-			L"UPDATE files SET latest_copy_log_id=? WHERE id=?",
-			-1, 0, &stmt, NULL
-		);
-		sqlite3_bind_int64(stmt, 1, log_id);
-		sqlite3_bind_int64(stmt, 2, file_id);
-		while (sqlite3_step(stmt) != SQLITE_DONE) {}
-		sqlite3_finalize(stmt);
-		backup(hashFileName(*this, false));
+	if (isChanged) {
+		DoBackup(sql3, parent, folder_id, file_id, dateTag);
+		// recordFileDir(sql3, dateTag, folder_id, file_id, hashFileName(*this, false));
 	}
 }
 
+// バックアップを実行する
+BOOL MyFile::DoBackup(sqlite3* sql3, int64_t parent, int64_t folder_id, int64_t file_id, const string& dateTag) {
+	int64_t log_id = createNewLogDBFile(sql3, file_id, dateTag);
+
+	sqlite3_stmt* sub_stmt;
+	sqlite3_prepare16_v3(sql3,
+		L"UPDATE files SET latest_copy_log_id=? WHERE id=?",
+		-1, 0, &sub_stmt, NULL
+	);
+	sqlite3_bind_int64(sub_stmt, 1, log_id);
+	sqlite3_bind_int64(sub_stmt, 2, file_id);
+	while (sqlite3_step(sub_stmt) != SQLITE_DONE) {}
+	sqlite3_finalize(sub_stmt);
+
+	std::wcout << TEXT("copying: ") << getPath() << endl;
+	// 時間がかかる操作
+	backup(hashFileName(*this, false));
+
+	if (timedOut) {
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
 int64_t MyFile::createNewFolderDB(sqlite3* sql3, int64_t parent) {
-	wstring szLongPath = GetPathWithoutHostname(GetDirNameFromPath(this->getPath(), parent));
+	wstring szLongPath = this->dname;
 	sqlite3_stmt* stmt;
-	szLongPath = szLongPath.empty() ? TEXT("?root?") : szLongPath;
 	sqlite3_prepare16_v3(sql3, L"SELECT id FROM folders WHERE drive_id=? AND folder_path=?", -1, 0, &stmt, NULL);
 	sqlite3_bind_int64(stmt, 1, this->drive.id);
 	sqlite3_bind_text16(stmt, 2, szLongPath.data(), szLongPath.length() * sizeof(TCHAR), NULL);
@@ -595,10 +572,11 @@ int64_t MyFile::createNewLogDBFile(sqlite3* sql3, int64_t file_id, const string 
 void MyFile::backup(const wstring& hashFile) {
 	TCHAR first[3] = { hashFile.at(0), hashFile.at(1), L'\0' };
 	TCHAR second[3] = { hashFile.at(2), hashFile.at(3), L'\0' };
-	if (!PathIsDirectory(szRoot.c_str())) {
-		CreateDirectory(szRoot.c_str(), NULL);
+	wstring srcRootPath = szRoot;
+	if (!PathIsDirectory(srcRootPath.c_str())) {
+		CreateDirectory(srcRootPath.c_str(), NULL);
 	}
-	wstring dir = szRoot + L"\\" + first;
+	wstring dir = srcRootPath + L"\\" + first;
 	if (!PathIsDirectory(dir.c_str())) {
 		CreateDirectory(dir.c_str(), NULL);
 	}
@@ -658,7 +636,7 @@ tuple<int, string, string> getBackupHistory(sqlite3* sql3)
 	// 1件目は直近の完了回、または完了したことがない状態での初回
 	if (sqlite3_step(stmt) == SQLITE_ROW) {
 		start_time= (const char*)sqlite3_column_text(stmt, 0);
-		end_time = (sqlite3_column_bytes(stmt, 1) > 0) ? (const char*)sqlite3_column_text(stmt, 1) : "";
+		end_time = (sqlite3_column_type(stmt, 1) != SQLITE_NULL) ? (const char*)sqlite3_column_text(stmt, 1) : "";
 		date_tag = (const char*)sqlite3_column_text(stmt, 2);
 		ret_value = (end_time != "") ? 0 : 1;
 
